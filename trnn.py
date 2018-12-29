@@ -39,9 +39,19 @@ print "single Sequence matrix input :",seq_size,"X",len(chars)
 ################################################################################
 # NETWORK ARCHITECTURE
 
-learningRate = 0.001 # learning rate
-gamma = 0.7 # for label smoothing using mass redistribution
+learningRate = 0.0005 # learning rate
+gamma = 0.9 # for label smoothing using mass redistribution
 headSize = 3 # dmodel/headSize must be int
+
+class DropoutLayer:
+    def flow(self,inp):
+        self.inp=inp
+        self.r=np.random.binomial(n=1,p=0.7,size=[self.inp.shape[0],self.inp.shape[1]])
+        self.y=self.inp*self.r
+        return self.y
+    def backprop(self,outderiv):
+        dinp=outderiv*self.r
+        return dinp
 
 class LayerNorm:
     def __init__(self):
@@ -53,7 +63,6 @@ class LayerNorm:
         self.mean = np.array([np.sum(self.inp,axis=1)/self.inp.shape[1]]).T
         self.variance = np.sqrt(np.array([np.sum((self.inp-self.mean)**2,axis=1)]).T/self.inp.shape[1])
         self.y = (self.gain/self.variance)*(self.inp-self.mean) + self.bias
-        #print "NormLayer:",self.y
         return self.y
 
     def backprop(self,derivOutput):
@@ -61,8 +70,6 @@ class LayerNorm:
         dbias = derivOutput
         dinp = self.gain*(self.variance*np.ones([self.inp.shape[0],self.inp.shape[1]])*(1-1/dmodel) - (self.inp-self.mean)*2*(self.mean-self.inp)/(dmodel*dmodel*self.variance))/(self.variance*self.variance)
         # apply gradient descent
-        #np.clip(dgain,-5,5,out=dgain)
-        #np.clip(dbias,-5,5,out=dbias)
         self.gain -= learningRate*(dgain/np.linalg.norm(dgain,'fro'))
         self.bias -= learningRate*(dbias/np.linalg.norm(dbias,'fro'))
         return dinp
@@ -82,13 +89,10 @@ class MultiheadAttentionLayer:
         self.q = q
         self.k = k
         self.v = v
-        # print "self.q into MHAttn",self.q
         self.ConcatHeadAttOutput = np.zeros([self.q.shape[0], self.q.shape[1]])
         self.headOutputs, self.AttHinpQ,self.AttHinpK, self.AttHinpV = [], [], [], []
         for hitr in range(self.h+1):
             if hitr==0:
-                # print "self.Wq[hitr] MHAttn",self.Wq[hitr]
-                # print "self.Wk[hitr] MHAttn",self.Wk[hitr]
                 valQ=np.dot(self.q,self.Wq[hitr])
                 valK=np.dot(self.k,self.Wk[hitr])
                 valV=np.dot(self.v,self.Wv[hitr])
@@ -110,7 +114,6 @@ class MultiheadAttentionLayer:
                 headAttOutput = np.concatenate((headAttOutput, val),axis=1)
                 self.headOutputs.append(val)
         self.output = np.dot(self.ConcatHeadAttOutput, self.Wo)
-        #print "MHAtt:",self.output
         return self.output
 
     def backprop(self,derivOutput):
@@ -133,12 +136,8 @@ class MultiheadAttentionLayer:
             dk += np.dot(self.Wk[hitr], dvalK.T).T
             dv += np.dot(self.Wv[hitr], dvalV.T).T
         # apply gradient descent
-        #np.clip(dWo,-5,5,out=dWo)
         self.Wo -= learningRate*(dWo/np.linalg.norm(dWo,'fro'))
         for hitr in range(self.h):
-            #np.clip(dWq[hitr],-5,5,out=dWq[hitr])
-            #np.clip(dWk[hitr],-5,5,out=dWk[hitr])
-            #np.clip(dWv[hitr],-5,5,out=dWv[hitr])
             self.Wq[hitr] -= learningRate*(dWq[hitr]/np.linalg.norm(dWq[hitr],'fro'))
             self.Wk[hitr] -= learningRate*(dWk[hitr]/np.linalg.norm(dWk[hitr],'fro'))
             self.Wv[hitr] -= learningRate*(dWv[hitr]/np.linalg.norm(dWv[hitr],'fro'))
@@ -149,8 +148,6 @@ class EncoderOnlyMaskedAttentionLayer:
         self.q = q
         self.k = k
         self.v = v
-        # print "self.q",self.q
-        # print "self.k.T",self.k.T
         self.a = np.dot(self.q, self.k.T)/np.sqrt(self.q.shape[1])
         for i in range(self.a.shape[0]):
             for j in range(self.a.shape[1]):
@@ -159,11 +156,9 @@ class EncoderOnlyMaskedAttentionLayer:
         # print "MskdAtt self.a",self.a #getting large
         self.z = softmax(self.a)
         self.att = np.dot(self.z, self.v)
-        #print "MaskedAtt:",self.att
         return self.att
 
     def backprop(self, derivOutput):
-        # print "self.a MskdAtt backprop",self.a
         dz=np.dot(self.v,derivOutput.T).T
         dv=np.dot(derivOutput.T,self.z).T
         da=dz*sftderiv(self.a)
@@ -192,7 +187,6 @@ class FeedFwdLayer:
         self.z = np.dot(self.inp, self.w1) + self.b1
         self.h = np.tanh(self.z)
         self.y = np.dot(self.h,self.w2) + self.b2
-        #print "FF:",self.y
         return self.y
 
     def backprop(self, derivOutput):
@@ -204,15 +198,10 @@ class FeedFwdLayer:
         db1 = dz
         dinp = np.dot(self.w1,dz.T).T
         # apply gradient descent
-        #np.clip(dW1,-5,5,out=dW1)
-        #np.clip(dW2,-5,5,out=dW2)
-        #np.clip(db1,-5,5,out=db1)
-        #np.clip(db2,-5,5,out=db2)
         self.w1 -= learningRate*(dw1/np.linalg.norm(dw1,'fro'))
         self.w2 -= learningRate*(dw2/np.linalg.norm(dw2,'fro'))
         self.b1 -= learningRate*(db1/np.linalg.norm(db1,'fro'))
         self.b2 -= learningRate*(db2/np.linalg.norm(db2,'fro'))
-        #print "FF dW1",dW1
         return dinp
 
 class SimpleLinearLayer:
@@ -225,7 +214,6 @@ class SimpleLinearLayer:
         self.z = np.dot(self.inp, self.w) + self.b
         self.y = np.tanh(self.z)
         self.y_curly = softmax(self.y)
-        # print "SimpleLinear:",self.y
         return self.y_curly
 
     def backprop(self,derivOutput):
@@ -235,8 +223,6 @@ class SimpleLinearLayer:
         db=dz
         dinp=np.dot(self.w,dz.T).T
         # apply gradient descent
-        #np.clip(dW,-5,5,out=dW)
-        #np.clip(db,-5,5,out=db)
         self.w -= learningRate*(dw/np.linalg.norm(dw,'fro'))
         self.b -= learningRate*(db/np.linalg.norm(db,'fro'))
         return dinp
@@ -244,23 +230,25 @@ class SimpleLinearLayer:
 class Layer:
     def __init__(self):
         self.MultiAttentionLayer1 = MultiheadAttentionLayer(headsize=headSize)
+        self.dl1 = DropoutLayer()
         self.NormLayer1 = LayerNorm()
         self.FeedFwdLayer1 = FeedFwdLayer(hlayersize=500)
+        self.dl2 = DropoutLayer()
         self.NormLayer2 = LayerNorm()
 
     def flow(self,inp):
         self.inp = inp
-        self.SubLayerOutput = self.NormLayer1.flow(self.inp + self.MultiAttentionLayer1.flow(q=self.inp,k=self.inp,v=self.inp))
-        self.LayerOutput = self.NormLayer2.flow(self.SubLayerOutput + self.FeedFwdLayer1.flow(finp=self.SubLayerOutput))
-        # print "Att:",self.SubLayerOutput
-        # print "EntireSingleLayer:",self.LayerOutput
+        self.SubLayerOutput = self.NormLayer1.flow(self.inp + self.dl1.flow(self.MultiAttentionLayer1.flow(q=self.inp,k=self.inp,v=self.inp)))
+        self.LayerOutput = self.NormLayer2.flow(self.SubLayerOutput + self.dl2.flow(self.FeedFwdLayer1.flow(finp=self.SubLayerOutput)))
         return self.LayerOutput
 
     def backprop(self,derivOutput):
         NL2inpDeriv = self.NormLayer2.backprop(derivOutput)
-        FF1inpDeriv = self.FeedFwdLayer1.backprop(NL2inpDeriv)
+        dl2inpDeriv = self.dl2.backprop(NL2inpDeriv)
+        FF1inpDeriv = self.FeedFwdLayer1.backprop(dl2inpDeriv)
         NL1inpDeriv = self.NormLayer1.backprop(FF1inpDeriv + NL2inpDeriv) # gradient flow for residual connections
-        MAL1inpDeriv = self.MultiAttentionLayer1.backprop(NL1inpDeriv)
+        dl1inpDeriv = self.dl1.backprop(NL1inpDeriv)
+        MAL1inpDeriv = self.MultiAttentionLayer1.backprop(dl1inpDeriv)
         return (MAL1inpDeriv + NL1inpDeriv) # gradient flow for residual connections
 
 class encoder:
@@ -298,9 +286,6 @@ class encoder:
 
 encoder1 = encoder()
 def init():
-    # num_seqes = len(corpus)/seq_size
-    # epochs = 500
-    # print epochs,"Epochs |",len(corpus),"chars/words per epoch |",num_seqes,"Sequences per epoch | seq_size:",seq_size
     waste=raw_input("Press enter to start, any other key will cancel and exit the program:")
     if waste != "":
         sys.exit()
@@ -309,8 +294,6 @@ def init():
         INP, TGT = get_seq()
         OUT = encoder1.flow(INP)
         loss = entropyLoss(out = OUT, tgt = TGT, gamma = gamma) # gamma is hyperparameter (0,1)
-        # state = "seq no."+str(n-(int(n/num_seqes))*(num_seqes)+1)+", epoch "+str(int(n/num_seqes)+1)
-        # state = "Epoch no.:"+str(int(n/num_seqes)+1)+" | Seq no.:"+str(n-(int(n/num_seqes))*(num_seqes)+1)+" | Loss:"+str(loss)
 
         optimize(model=encoder1,out=OUT,tgt=TGT)
 
@@ -381,10 +364,10 @@ def convert(out):
 def optimize(model, out, tgt):
     output = np.copy(out)
     target = np.copy(tgt)
-    # finalDeriv = -(tgt/out)*seq_size
     finalDeriv=np.zeros([out.shape[0],out.shape[1]])
     for i in range(seq_size):
         finalDeriv[i][np.argmax(target[i])] = -1/(seq_size*(output[i][np.argmax(target[i])]))
+    # finalDeriv = -target/(output*seq_size)
     model.backprop(derivOutput=finalDeriv)
 
 init()
