@@ -19,7 +19,7 @@ for i in range(dmodel):
 seq_size=10
 beg=0
 end=seq_size
-def get_seq(): # generate consecutive overlapped sequqnces of fixed length
+def get_seq(): # generate consecutive sequences of fixed length
     global beg,end
     if end>len(corpus):
         beg=0
