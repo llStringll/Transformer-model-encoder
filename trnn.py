@@ -7,7 +7,7 @@ warnings.simplefilter("error", RuntimeWarning)
 ################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:30] # max 5M
+corpus=open("seqText.txt",'r').read()[0:5000] # max 5M
 chars=list(set(corpus))
 emb=dict()
 X,Y=[],[]
@@ -36,19 +36,20 @@ print "Sequence size :",seq_size
 print "single Embedding : 1 X",len(chars)
 print "single Sequence matrix input :",seq_size,"X",len(chars)
 
-# mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
+mychars = [' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 # mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
+# mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
 # mychars = ['a',' ','s','o','w']
 # mychars = ['a',' ','c','b','e','l','o','n','p','s','r','t','w','y']
 # mychars = ['a',' ','b','l','o','n','s','w','y']
-mychars = ['a',' ','c','b','e','l','o','n','p','s','r','u','t','w','y']
+# mychars = ['a',' ','c','b','e','l','o','n','p','s','r','u','t','w','y']
 # mychars = ['a',' ','b','e','l','o','n','s','r','t','w','y']
 
 ################################################################################
 # NETWORK ARCHITECTURE
 
 learningRate = 0.0001 # learning rate
-gamma = 0.2 # for label smoothing using mass redistribution
+gamma = 0.3 # for label smoothing using mass redistribution
 headSize = 3 # dmodel/headSize must be int
 
 # for adam
