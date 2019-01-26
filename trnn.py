@@ -7,7 +7,7 @@ warnings.simplefilter("error", RuntimeWarning)
 ################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:10] # max 5M
+corpus=open("seqText.txt",'r').read()[0:30] # max 5M
 chars=list(set(corpus))
 emb=dict()
 X,Y=[],[]
@@ -36,20 +36,35 @@ print "Sequence size :",seq_size
 print "single Embedding : 1 X",len(chars)
 print "single Sequence matrix input :",seq_size,"X",len(chars)
 
+# mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
+# mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
+# mychars = ['a',' ','s','o','w']
+# mychars = ['a',' ','c','b','e','l','o','n','p','s','r','t','w','y']
+# mychars = ['a',' ','b','l','o','n','s','w','y']
+mychars = ['a',' ','c','b','e','l','o','n','p','s','r','u','t','w','y']
+# mychars = ['a',' ','b','e','l','o','n','s','r','t','w','y']
+
 ################################################################################
 # NETWORK ARCHITECTURE
 
-learningRate = 0.0005 # learning rate
-gamma = 0.9 # for label smoothing using mass redistribution
+learningRate = 0.0001 # learning rate
+gamma = 0.2 # for label smoothing using mass redistribution
 headSize = 3 # dmodel/headSize must be int
+
+# for adam
+warmup_steps = 4000
+alpha = 0
+beta1 = 0.9
+beta2 = 0.98
+eps = 1e-9
 
 class DropoutLayer:
     def flow(self,inp):
         self.inp=inp
-        self.r=np.random.binomial(n=1,p=0.7,size=[self.inp.shape[0],self.inp.shape[1]])
+        self.r=np.random.binomial(n=1,p=0.9,size=[self.inp.shape[0],self.inp.shape[1]])
         self.y=self.inp*self.r
         return self.y
-    def backprop(self,outderiv):
+    def backprop(self,outderiv,t):
         dinp=outderiv*self.r
         return dinp
 
@@ -57,6 +72,10 @@ class LayerNorm:
     def __init__(self):
         self.gain = np.random.randn(seq_size, dmodel)
         self.bias = np.random.randn(seq_size, dmodel)
+        self.gainm = np.zeros([seq_size, dmodel])
+        self.gainv = np.zeros([seq_size, dmodel])
+        self.biasm = np.zeros([seq_size, dmodel])
+        self.biasv = np.zeros([seq_size, dmodel])
 
     def flow(self,x):
         self.inp = x
@@ -65,25 +84,46 @@ class LayerNorm:
         self.y = (self.gain/self.variance)*(self.inp-self.mean) + self.bias
         return self.y
 
-    def backprop(self,derivOutput):
+    def backprop(self,derivOutput,t):
         dgain = derivOutput * (self.inp - self.mean)/self.variance
         dbias = derivOutput
         dinp = self.gain*(self.variance*np.ones([self.inp.shape[0],self.inp.shape[1]])*(1-1/dmodel) - (self.inp-self.mean)*2*(self.mean-self.inp)/(dmodel*dmodel*self.variance))/(self.variance*self.variance)
         # apply gradient descent
-        self.gain -= learningRate*(dgain/np.linalg.norm(dgain,'fro'))
-        self.bias -= learningRate*(dbias/np.linalg.norm(dbias,'fro'))
+
+        # self.gain -= learningRate*(dgain/np.linalg.norm(dgain,'fro'))
+        # self.bias -= learningRate*(dbias/np.linalg.norm(dbias,'fro'))
+
+        alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
+
+        self.gainm = beta1*self.gainm + (1-beta1)*dgain
+        self.gainv = beta2*self.gainv + (1-beta2)*dgain*dgain
+        self.gain -= alphat*self.gainm/(np.sqrt(self.gainv)+eps)
+
+        self.biasm = beta1*self.biasm + (1-beta1)*dbias
+        self.biasv = beta2*self.biasv + (1-beta2)*dbias*dbias
+        self.bias -= alphat*self.biasm/(np.sqrt(self.biasv)+eps)
+
         return dinp
 
 class MultiheadAttentionLayer:
     def __init__(self,headsize):
         self.h = headsize
         self.Wq,self.Wk,self.Wv,self.AttLayer=[],[],[],[]
+        self.Wqm, self.Wqv,self.Wkm, self.Wkv,self.Wvm, self.Wvv=[],[],[],[],[],[]
         for hitr in range(self.h):
             self.Wq.append(np.random.randn(dmodel, dmodel/self.h))
             self.Wk.append(np.random.randn(dmodel, dmodel/self.h))
             self.Wv.append(np.random.randn(dmodel, dmodel/self.h))
+            self.Wqm.append(np.zeros([dmodel, dmodel/self.h]))
+            self.Wqv.append(np.zeros([dmodel, dmodel/self.h]))
+            self.Wkm.append(np.zeros([dmodel, dmodel/self.h]))
+            self.Wkv.append(np.zeros([dmodel, dmodel/self.h]))
+            self.Wvm.append(np.zeros([dmodel, dmodel/self.h]))
+            self.Wvv.append(np.zeros([dmodel, dmodel/self.h]))
             self.AttLayer.append(EncoderOnlyMaskedAttentionLayer())
         self.Wo = np.random.randn(dmodel, dmodel)
+        self.Wom = np.zeros([dmodel,dmodel])
+        self.Wov = np.zeros([dmodel,dmodel])
 
     def flow(self,q,k,v):
         self.q = q
@@ -116,7 +156,7 @@ class MultiheadAttentionLayer:
         self.output = np.dot(self.ConcatHeadAttOutput, self.Wo)
         return self.output
 
-    def backprop(self,derivOutput):
+    def backprop(self,derivOutput,t):
         dWo = np.dot(derivOutput.T, self.ConcatHeadAttOutput).T
         dConcatHeadOutput = np.dot(self.Wo, derivOutput.T).T
         dheadOutputs, dAttHinpQ, dAttHinpK, dAttHinpV = [], [], [], []
@@ -136,11 +176,31 @@ class MultiheadAttentionLayer:
             dk += np.dot(self.Wk[hitr], dvalK.T).T
             dv += np.dot(self.Wv[hitr], dvalV.T).T
         # apply gradient descent
-        self.Wo -= learningRate*(dWo/np.linalg.norm(dWo,'fro'))
+
+        # self.Wo -= learningRate*(dWo/np.linalg.norm(dWo,'fro'))
+        # for hitr in range(self.h):
+        #     self.Wq[hitr] -= learningRate*(dWq[hitr]/np.linalg.norm(dWq[hitr],'fro'))
+        #     self.Wk[hitr] -= learningRate*(dWk[hitr]/np.linalg.norm(dWk[hitr],'fro'))
+        #     self.Wv[hitr] -= learningRate*(dWv[hitr]/np.linalg.norm(dWv[hitr],'fro'))
+
+        alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
+
+        self.Wom = beta1*self.Wom + (1-beta1)*dWo
+        self.Wov = beta2*self.Wov + (1-beta2)*dWo*dWo
+        self.Wo -= alphat*self.Wom/(np.sqrt(self.Wov)+eps)
+
         for hitr in range(self.h):
-            self.Wq[hitr] -= learningRate*(dWq[hitr]/np.linalg.norm(dWq[hitr],'fro'))
-            self.Wk[hitr] -= learningRate*(dWk[hitr]/np.linalg.norm(dWk[hitr],'fro'))
-            self.Wv[hitr] -= learningRate*(dWv[hitr]/np.linalg.norm(dWv[hitr],'fro'))
+                self.Wqm[hitr] = beta1*self.Wqm[hitr] + (1-beta1)*dWq[hitr]
+                self.Wqv[hitr] = beta2*self.Wqv[hitr] + (1-beta2)*dWq[hitr]*dWq[hitr]
+                self.Wq[hitr] -= alphat*self.Wqm[hitr]/(np.sqrt(self.Wqv[hitr])+eps)
+
+                self.Wkm[hitr] = beta1*self.Wkm[hitr] + (1-beta1)*dWk[hitr]
+                self.Wkv[hitr] = beta2*self.Wkv[hitr] + (1-beta2)*dWk[hitr]*dWk[hitr]
+                self.Wk[hitr] -= alphat*self.Wkm[hitr]/(np.sqrt(self.Wkv[hitr])+eps)
+
+                self.Wvm[hitr] = beta1*self.Wvm[hitr] + (1-beta1)*dWv[hitr]
+                self.Wvv[hitr] = beta2*self.Wvv[hitr] + (1-beta2)*dWv[hitr]*dWv[hitr]
+                self.Wv[hitr] -= alphat*self.Wvm[hitr]/(np.sqrt(self.Wvv[hitr])+eps)
         return (dq+dk+dv)
 
 class EncoderOnlyMaskedAttentionLayer:
@@ -182,49 +242,91 @@ class FeedFwdLayer:
         self.w2 = np.random.randn(self.hiddenLayerSize, dmodel)
         self.b1 = np.random.randn(seq_size, self.hiddenLayerSize)
         self.b2 = np.random.randn(seq_size, dmodel)
+        self.w1m = np.zeros([dmodel, self.hiddenLayerSize])
+        self.w1v = np.zeros([dmodel, self.hiddenLayerSize])
+        self.w2m = np.zeros([self.hiddenLayerSize, dmodel])
+        self.w2v = np.zeros([self.hiddenLayerSize, dmodel])
+        self.b1m = np.zeros([seq_size, self.hiddenLayerSize])
+        self.b1v = np.zeros([seq_size, self.hiddenLayerSize])
+        self.b2m = np.zeros([seq_size, dmodel])
+        self.b2v = np.zeros([seq_size, dmodel])
     def flow(self,finp):
         self.inp = finp
         self.z = np.dot(self.inp, self.w1) + self.b1
-        self.h = np.tanh(self.z)
+        self.h = relu(self.z)
         self.y = np.dot(self.h,self.w2) + self.b2
         return self.y
 
-    def backprop(self, derivOutput):
+    def backprop(self, derivOutput,t):
         dw2 = np.dot(derivOutput.T, self.h).T
         db2 = derivOutput
         dh = np.dot(self.w2,derivOutput.T).T
-        dz = dh*tanhDeriv(self.z)
+        dz = dh*reluDeriv(self.z)
         dw1 = np.dot(dz.T,self.inp).T
         db1 = dz
         dinp = np.dot(self.w1,dz.T).T
         # apply gradient descent
-        self.w1 -= learningRate*(dw1/np.linalg.norm(dw1,'fro'))
-        self.w2 -= learningRate*(dw2/np.linalg.norm(dw2,'fro'))
-        self.b1 -= learningRate*(db1/np.linalg.norm(db1,'fro'))
-        self.b2 -= learningRate*(db2/np.linalg.norm(db2,'fro'))
+
+        # self.w1 -= learningRate*(dw1/np.linalg.norm(dw1,'fro'))
+        # self.w2 -= learningRate*(dw2/np.linalg.norm(dw2,'fro'))
+        # self.b1 -= learningRate*(db1/np.linalg.norm(db1,'fro'))
+        # self.b2 -= learningRate*(db2/np.linalg.norm(db2,'fro'))
+
+        alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
+
+        self.w1m = beta1*self.w1m + (1-beta1)*dw1
+        self.w1v = beta2*self.w1v + (1-beta2)*dw1*dw1
+        self.w1 -= alphat*self.w1m/(np.sqrt(self.w1v)+eps)
+
+        self.w2m = beta1*self.w2m + (1-beta1)*dw2
+        self.w2v = beta2*self.w2v + (1-beta2)*dw2*dw2
+        self.w2 -= alphat*self.w2m/(np.sqrt(self.w2v)+eps)
+
+        self.b1m = beta1*self.b1m + (1-beta1)*db1
+        self.b1v = beta2*self.b1v + (1-beta2)*db1*db1
+        self.b1 -= alphat*self.b1m/(np.sqrt(self.b1v)+eps)
+
+        self.b2m = beta1*self.b2m + (1-beta1)*db2
+        self.b2v = beta2*self.b2v + (1-beta2)*db2*db2
+        self.b2 -= alphat*self.b2m/(np.sqrt(self.b2v)+eps)
         return dinp
 
 class SimpleLinearLayer:
     def __init__(self):
         self.w = np.random.randn(dmodel, dmodel)
         self.b = np.random.randn(seq_size, dmodel)
+        self.wm = np.zeros([dmodel,dmodel])
+        self.wv = np.zeros([dmodel,dmodel])
+        self.bm = np.zeros([seq_size,dmodel])
+        self.bv = np.zeros([seq_size,dmodel])
 
     def flow(self,inp):
         self.inp = inp
         self.z = np.dot(self.inp, self.w) + self.b
-        self.y = np.tanh(self.z)
+        self.y = relu(self.z)
         self.y_curly = softmax(self.y)
         return self.y_curly
 
-    def backprop(self,derivOutput):
+    def backprop(self,derivOutput,t):
         dy=derivOutput*sftderiv(self.y)
-        dz=dy*tanhDeriv(self.z)
+        dz=dy*reluDeriv(self.z)
         dw=np.dot(dz.T,self.inp).T
         db=dz
         dinp=np.dot(self.w,dz.T).T
         # apply gradient descent
-        self.w -= learningRate*(dw/np.linalg.norm(dw,'fro'))
-        self.b -= learningRate*(db/np.linalg.norm(db,'fro'))
+
+        # self.w -= learningRate*(dw/np.linalg.norm(dw,'fro'))
+        # self.b -= learningRate*(db/np.linalg.norm(db,'fro'))
+
+        alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
+
+        self.wm = beta1*self.wm + (1-beta1)*dw
+        self.wv = beta2*self.wv + (1-beta2)*dw*dw
+        self.w -= alphat*self.wm/(np.sqrt(self.wv)+eps)
+
+        self.bm = beta1*self.bm + (1-beta1)*db
+        self.bv = beta2*self.bv + (1-beta2)*db*db
+        self.b -= alphat*self.bm/(np.sqrt(self.bv)+eps)
         return dinp
 
 class Layer:
@@ -232,7 +334,7 @@ class Layer:
         self.MultiAttentionLayer1 = MultiheadAttentionLayer(headsize=headSize)
         self.dl1 = DropoutLayer()
         self.NormLayer1 = LayerNorm()
-        self.FeedFwdLayer1 = FeedFwdLayer(hlayersize=500)
+        self.FeedFwdLayer1 = FeedFwdLayer(hlayersize=1000)
         self.dl2 = DropoutLayer()
         self.NormLayer2 = LayerNorm()
 
@@ -242,13 +344,13 @@ class Layer:
         self.LayerOutput = self.NormLayer2.flow(self.SubLayerOutput + self.dl2.flow(self.FeedFwdLayer1.flow(finp=self.SubLayerOutput)))
         return self.LayerOutput
 
-    def backprop(self,derivOutput):
-        NL2inpDeriv = self.NormLayer2.backprop(derivOutput)
-        dl2inpDeriv = self.dl2.backprop(NL2inpDeriv)
-        FF1inpDeriv = self.FeedFwdLayer1.backprop(dl2inpDeriv)
-        NL1inpDeriv = self.NormLayer1.backprop(FF1inpDeriv + NL2inpDeriv) # gradient flow for residual connections
-        dl1inpDeriv = self.dl1.backprop(NL1inpDeriv)
-        MAL1inpDeriv = self.MultiAttentionLayer1.backprop(dl1inpDeriv)
+    def backprop(self,derivOutput,t):
+        NL2inpDeriv = self.NormLayer2.backprop(derivOutput,t)
+        dl2inpDeriv = self.dl2.backprop(NL2inpDeriv,t)
+        FF1inpDeriv = self.FeedFwdLayer1.backprop(dl2inpDeriv,t)
+        NL1inpDeriv = self.NormLayer1.backprop(FF1inpDeriv + NL2inpDeriv,t) # gradient flow for residual connections
+        dl1inpDeriv = self.dl1.backprop(NL1inpDeriv,t)
+        MAL1inpDeriv = self.MultiAttentionLayer1.backprop(dl1inpDeriv,t)
         return (MAL1inpDeriv + NL1inpDeriv) # gradient flow for residual connections
 
 class encoder:
@@ -272,38 +374,46 @@ class encoder:
         self.y = self.LinearLayer1.flow(self.L6output)
         return self.y
 
-    def backprop(self,derivOutput):
-        LL1inpDeriv = self.LinearLayer1.backprop(derivOutput)
-        L6inpDeriv = self.Layer6.backprop(LL1inpDeriv)
-        L5inpDeriv = self.Layer5.backprop(L6inpDeriv)
-        L4inpDeriv = self.Layer4.backprop(L5inpDeriv)
-        L3inpDeriv = self.Layer3.backprop(L4inpDeriv)
-        L2inpDeriv = self.Layer2.backprop(L3inpDeriv)
-        L1inpDeriv = self.Layer1.backprop(L2inpDeriv)
+    def backprop(self,derivOutput,t):
+        LL1inpDeriv = self.LinearLayer1.backprop(derivOutput,t)
+        L6inpDeriv = self.Layer6.backprop(LL1inpDeriv,t)
+        L5inpDeriv = self.Layer5.backprop(L6inpDeriv,t)
+        L4inpDeriv = self.Layer4.backprop(L5inpDeriv,t)
+        L3inpDeriv = self.Layer3.backprop(L4inpDeriv,t)
+        L2inpDeriv = self.Layer2.backprop(L3inpDeriv,t)
+        L1inpDeriv = self.Layer1.backprop(L2inpDeriv,t)
 
 ################################################################################
 # EXECUTION FUNCTIONS
 
 encoder1 = encoder()
 def init():
+    global learningRate,alpha,warmup_steps
     waste=raw_input("Press enter to start, any other key will cancel and exit the program:")
     if waste != "":
         sys.exit()
     itr=0
+    itr2=0
     while True:
+        itr+=1
+        alpha = (1/np.sqrt(dmodel))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
         INP, TGT = get_seq()
         OUT = encoder1.flow(INP)
         loss = entropyLoss(out = OUT, tgt = TGT, gamma = gamma) # gamma is hyperparameter (0,1)
-
-        optimize(model=encoder1,out=OUT,tgt=TGT)
-
-        print convert(OUT)
-        print "itr:",itr,"| loss:",loss
-        itr+=1
+        optimize(model=encoder1,out=OUT,tgt=TGT,itr=itr)
+        if itr%(len(corpus)/seq_size) == 0:
+            itr2+=1
+            print "input: ",convert(INP)
+            print "target: ",convert(TGT)
+            print "output: ",convert(OUT)
+            print "itr:",itr2,"| loss:",loss,"| alpha:",alpha
     print "\nDONE!"
 
-def softmax(inpvec):
+def softmax(inpvec1):
     # compute softmax for every row seperately
+    inpvec = np.copy(inpvec1)
+    for i in range(inpvec.shape[0]):
+        inpvec[i] = inpvec[i]-max(inpvec[i])
     try:
         expovec = np.exp(inpvec)
         sftvec = expovec/(np.array([np.sum(expovec,axis=1)])).T
@@ -315,7 +425,7 @@ def softmax(inpvec):
 def relu(inpvec):
     return (inpvec * (inpvec > 0))
 
-def reluderiv(inpvec):
+def reluDeriv(inpvec):
     return (inpvec > 0)
 
 def sftderiv(inpvec):
@@ -337,7 +447,7 @@ def KLdvgLoss(out, tgt, gamma):
                 target[i][j] = gamma
             else:
                 target[i][j] = (1-gamma)/(K-1)
-    KLloss = np.sum(target * (np.log(target) - np.log(output)), axis=1)
+    KLloss = np.sum(target * (np.log(target/output)), axis=1)
     seq_loss = np.sum(KLloss)/len(KLloss)
     return seq_loss
 
@@ -346,13 +456,9 @@ def entropyLoss(out,tgt,gamma):
     target = np.copy(tgt)
     l=0
     for i in range(seq_size):
-        l+= -np.log(output[i][np.argmax(target[i])])
+        l += -np.log(output[i][np.argmax(target[i])])
     l/=seq_size
     return l
-
-# mychars = ['a',' ','s','o','w']
-# mychars = ['a',' ','c','b','e','l','o','n','p','s','r','t','w','y']
-mychars = ['a',' ','b','l','o','n','s','w','y']
 
 def convert(out):
     pred1 = np.copy(out)
@@ -361,13 +467,25 @@ def convert(out):
         predString += mychars[np.argmax(pred1[i])]
     return predString
 
-def optimize(model, out, tgt):
+def optimize(model, out, tgt, itr):
     output = np.copy(out)
     target = np.copy(tgt)
     finalDeriv=np.zeros([out.shape[0],out.shape[1]])
     for i in range(seq_size):
-        finalDeriv[i][np.argmax(target[i])] = -1/(seq_size*(output[i][np.argmax(target[i])]))
+        try:
+            finalDeriv[i][np.argmax(target[i])] = -1/(seq_size*(output[i][np.argmax(target[i])]))
+        except RuntimeWarning:
+            print "Overflow double-scalar"
+            print output[i]
+            sys.exit()
+    # K = target.shape[1] # target is seqXemb, and as emb is 1ofK, so emb_size=no. of classes, or no. of possible chars/words
+    # for i in range(target.shape[0]):
+    #     for j in range(target.shape[1]):
+    #         if target[i][j] == 1:
+    #             target[i][j] = gamma
+    #         else:
+    #             target[i][j] = (1-gamma)/(K-1)
     # finalDeriv = -target/(output*seq_size)
-    model.backprop(derivOutput=finalDeriv)
+    model.backprop(derivOutput=finalDeriv,t=itr)
 
 init()
