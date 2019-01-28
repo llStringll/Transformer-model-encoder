@@ -7,3 +7,5 @@
 2. Dropout and L2 regularization both reduce weight norm.
 3. To apply dropouts to pretrained parameters, reduce the learning rate compared to what it was during pretraining.
 4. Updation of learning rate must be based on the gradients not on loss value, no matter what optimization technique is being used.
+
+*Check the closed issue, has an amazing point!!
