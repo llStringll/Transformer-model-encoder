@@ -8,7 +8,7 @@ warnings.simplefilter("error", RuntimeWarning)
 ################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:10000] # max 5M
+corpus=open("seqText.txt",'r').read()[0:1000000] # max 5M
 chars=list(set(corpus))
 emb=dict()
 X,Y=[],[]
