@@ -22,7 +22,7 @@ beg=0
 end=seq_size
 def get_seq(): # generate consecutive sequences of fixed length
     global beg,end
-    if end>len(corpus):
+    if end>len(corpus)-1:
         beg=0
         end=seq_size
     inp_seq, out_seq=[],[]
