@@ -2,12 +2,13 @@ import numpy as np
 import sys
 import time
 import warnings
+import matplotlib.pyplot as plt
 
 warnings.simplefilter("error", RuntimeWarning)
 ################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:5000] # max 5M
+corpus=open("seqText.txt",'r').read()[0:10000] # max 5M
 chars=list(set(corpus))
 emb=dict()
 X,Y=[],[]
@@ -27,7 +28,7 @@ def get_seq(): # generate consecutive sequences of fixed length
     inp_seq, out_seq=[],[]
     for i in range(beg,end):
         inp_seq.append(emb[corpus[i]])
-        out_seq.append(emb[corpus[i]])
+        out_seq.append(emb[corpus[i+1]])
     beg=end
     end+=seq_size
     return np.array(inp_seq),np.array(out_seq)
@@ -35,34 +36,42 @@ def get_seq(): # generate consecutive sequences of fixed length
 print "Sequence size :",seq_size
 print "single Embedding : 1 X",len(chars)
 print "single Sequence matrix input :",seq_size,"X",len(chars)
+print "Total sequences : ",len(corpus)/seq_size
 
-mychars = [' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
-# mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
+mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
+# mychars = [' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 # mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
 # mychars = ['a',' ','s','o','w']
 # mychars = ['a',' ','c','b','e','l','o','n','p','s','r','t','w','y']
 # mychars = ['a',' ','b','l','o','n','s','w','y']
 # mychars = ['a',' ','c','b','e','l','o','n','p','s','r','u','t','w','y']
+# mychars = ['a',' ','c','b','e','d','f','m','l','o','n','p','s','r','u','t','w','y']
 # mychars = ['a',' ','b','e','l','o','n','s','r','t','w','y']
 
 ################################################################################
 # NETWORK ARCHITECTURE
 
-learningRate = 0.0001 # learning rate
+EPOCH_NO = 10
+learningRate = 0.001 # learning rate
 gamma = 0.3 # for label smoothing using mass redistribution
-headSize = 3 # dmodel/headSize must be int
+headSize = 4 # dmodel/headSize must be int
+guccipoint = 1.4 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
+HLS = 3000
 
 # for adam
-warmup_steps = 4000
+warmup_steps = 6000
 alpha = 0
 beta1 = 0.9
-beta2 = 0.98
+beta2 = 0.998
 eps = 1e-9
+EPOCH,LOSS=[],[]
+
+print "Epochs:",EPOCH_NO
 
 class DropoutLayer:
     def flow(self,inp):
         self.inp=inp
-        self.r=np.random.binomial(n=1,p=0.9,size=[self.inp.shape[0],self.inp.shape[1]])
+        self.r=np.random.binomial(n=1,p=0.2,size=[self.inp.shape[0],self.inp.shape[1]])
         self.y=self.inp*self.r
         return self.y
     def backprop(self,outderiv,t):
@@ -335,7 +344,7 @@ class Layer:
         self.MultiAttentionLayer1 = MultiheadAttentionLayer(headsize=headSize)
         self.dl1 = DropoutLayer()
         self.NormLayer1 = LayerNorm()
-        self.FeedFwdLayer1 = FeedFwdLayer(hlayersize=1000)
+        self.FeedFwdLayer1 = FeedFwdLayer(hlayersize=HLS)
         self.dl2 = DropoutLayer()
         self.NormLayer2 = LayerNorm()
 
@@ -394,21 +403,34 @@ def init():
     if waste != "":
         sys.exit()
     itr=0
-    itr2=0
+    epoch=0
     while True:
         itr+=1
-        alpha = (1/np.sqrt(dmodel))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
+        # alpha = (1/np.sqrt(600))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
+        # alpha=0.0001
         INP, TGT = get_seq()
         OUT = encoder1.flow(INP)
         loss = entropyLoss(out = OUT, tgt = TGT, gamma = gamma) # gamma is hyperparameter (0,1)
         optimize(model=encoder1,out=OUT,tgt=TGT,itr=itr)
+        sys.stdout.write("\r\x1b"+str(itr))
+        sys.stdout.flush()        
         if itr%(len(corpus)/seq_size) == 0:
-            itr2+=1
-            print "input: ",convert(INP)
-            print "target: ",convert(TGT)
-            print "output: ",convert(OUT)
-            print "itr:",itr2,"| loss:",loss,"| alpha:",alpha
+            epoch+=1
+            # print "input: ",INP
+            # print "target: ",TGT[0]
+            # print "output: ",OUT[0]
+            print ">epoch:",epoch,"| loss of last seq:",loss,"| alpha:",alpha
+            EPOCH.append(epoch)
+            LOSS.append(loss)
+            alpha = (1/np.sqrt(600))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
+        if (epoch >= EPOCH_NO):
+            break
     print "\nDONE!"
+    plt.plot(EPOCH,LOSS)
+    plt.xlabel("EPOCH")
+    plt.ylabel("LOSS OF LAST SEQ.")
+    plt.title("Dataset_size:"+str(len(corpus))+",seq_size:"+str(seq_size)+ ",no_of_sequences:"+str(len(corpus)/seq_size) +",epochs:"+str(EPOCH_NO)+",hiddenLayerSize:"+str(HLS)+",guccipoint:"+str(guccipoint)+",headsize:"+str(headSize))
+    plt.show()
 
 def softmax(inpvec1):
     # compute softmax for every row seperately
@@ -453,12 +475,17 @@ def KLdvgLoss(out, tgt, gamma):
     return seq_loss
 
 def entropyLoss(out,tgt,gamma):
+    global guccipoint,seq_size,dmodel
     output = np.copy(out)
     target = np.copy(tgt)
     l=0
-    for i in range(seq_size):
-        l += -np.log(output[i][np.argmax(target[i])])
-    l/=seq_size
+    for i in range(output.shape[0]):
+        for j in range(output[i].shape[0]):
+            if(target[i][j]==1):
+                l += -(guccipoint)*np.log(output[i][j])
+            else:
+                l += -np.log(1-output[i][j])
+    l/=(seq_size)
     return l
 
 def convert(out):
@@ -469,16 +496,22 @@ def convert(out):
     return predString
 
 def optimize(model, out, tgt, itr):
+    global guccipoint,dmodel,seq_size
     output = np.copy(out)
     target = np.copy(tgt)
     finalDeriv=np.zeros([out.shape[0],out.shape[1]])
-    for i in range(seq_size):
-        try:
-            finalDeriv[i][np.argmax(target[i])] = -1/(seq_size*(output[i][np.argmax(target[i])]))
-        except RuntimeWarning:
-            print "Overflow double-scalar"
-            print output[i]
-            sys.exit()
+    for i in range(target.shape[0]):
+        for j in range(target[i].shape[0]):
+            try:
+                if(target[i][j]==1):
+                    finalDeriv[i][j] = -guccipoint/(output[i][j])
+                else:
+                    finalDeriv[i][j] = 1/(1 - output[i][j])
+            except RuntimeWarning:
+                print "Overflow double-scalar"
+                print output[i]
+                sys.exit()
+    finalDeriv /= (seq_size)
     # K = target.shape[1] # target is seqXemb, and as emb is 1ofK, so emb_size=no. of classes, or no. of possible chars/words
     # for i in range(target.shape[0]):
     #     for j in range(target.shape[1]):
