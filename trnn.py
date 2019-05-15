@@ -5,7 +5,7 @@ import warnings
 import matplotlib.pyplot as plt
 
 warnings.simplefilter("error", RuntimeWarning)
-################################################################################
+#########################################################################################
 # PARSING OF DATASET
 
 corpus=open("seqText.txt",'r').read()[0:400000] # max 5M
@@ -43,8 +43,8 @@ mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n',
 # mychars = [' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 # mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
 
-################################################################################
-# NETWORK ARCHITECTURE
+#########################################################################################
+# NETWORK PARAMETERS
 
 EPOCH_NO = 5
 learningRate = 0.001 # learning rate
@@ -62,6 +62,9 @@ eps = 1e-8
 EPOCH,LOSS=[],[]
 
 print "Epochs:",EPOCH_NO
+
+#########################################################################################
+# NETWORK ARCHITECTURE
 
 class DropoutLayer:
     def flow(self,inp):
