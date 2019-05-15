@@ -8,7 +8,8 @@ warnings.simplefilter("error", RuntimeWarning)
 ################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:1000000] # max 5M
+corpus=open("seqText.txt",'r').read()[0:400000] # max 5M
+# corpus=open("/content/drive/My Drive/app/seqText.txt",'r').read()[0:10000] # max 5M
 chars=list(set(corpus))
 emb=dict()
 X,Y=[],[]
@@ -17,7 +18,7 @@ for i in range(dmodel):
     emb[chars[i]]=np.zeros([dmodel])
     emb[chars[i]][i]=1
 
-seq_size=10
+seq_size=100
 beg=0
 end=seq_size
 def get_seq(): # generate consecutive sequences of fixed length
@@ -41,29 +42,23 @@ print "Total sequences : ",len(corpus)/seq_size
 mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 # mychars = [' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 # mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
-# mychars = ['a',' ','s','o','w']
-# mychars = ['a',' ','c','b','e','l','o','n','p','s','r','t','w','y']
-# mychars = ['a',' ','b','l','o','n','s','w','y']
-# mychars = ['a',' ','c','b','e','l','o','n','p','s','r','u','t','w','y']
-# mychars = ['a',' ','c','b','e','d','f','m','l','o','n','p','s','r','u','t','w','y']
-# mychars = ['a',' ','b','e','l','o','n','s','r','t','w','y']
 
 ################################################################################
 # NETWORK ARCHITECTURE
 
-EPOCH_NO = 10
+EPOCH_NO = 5
 learningRate = 0.001 # learning rate
 gamma = 0.3 # for label smoothing using mass redistribution
 headSize = 4 # dmodel/headSize must be int
-guccipoint = 1.4 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
-HLS = 3000
+guccipoint = 1.05 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
+HLS = 125 # embeddings expand upto this layer for each word in sequence
 
 # for adam
-warmup_steps = 6000
-alpha = 0
+warmup_steps = 4000
+alpha = 0.001 # only for first update
 beta1 = 0.9
-beta2 = 0.998
-eps = 1e-9
+beta2 = 0 # increasing as per (1-1/itr)
+eps = 1e-8
 EPOCH,LOSS=[],[]
 
 print "Epochs:",EPOCH_NO
@@ -398,7 +393,7 @@ class encoder:
 
 encoder1 = encoder()
 def init():
-    global learningRate,alpha,warmup_steps
+    global learningRate,alpha,warmup_steps, beta2
     waste=raw_input("Press enter to start, any other key will cancel and exit the program:")
     if waste != "":
         sys.exit()
@@ -406,30 +401,29 @@ def init():
     epoch=0
     while True:
         itr+=1
-        # alpha = (1/np.sqrt(600))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
-        # alpha=0.0001
+        alpha = (1/np.sqrt(500))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
         INP, TGT = get_seq()
         OUT = encoder1.flow(INP)
         loss = entropyLoss(out = OUT, tgt = TGT, gamma = gamma) # gamma is hyperparameter (0,1)
         optimize(model=encoder1,out=OUT,tgt=TGT,itr=itr)
         sys.stdout.write("\r\x1b"+str(itr))
-        sys.stdout.flush()        
+        sys.stdout.flush()
+        beta2 = (1-1.0/(itr+10))
         if itr%(len(corpus)/seq_size) == 0:
             epoch+=1
             # print "input: ",INP
             # print "target: ",TGT[0]
             # print "output: ",OUT[0]
-            print ">epoch:",epoch,"| loss of last seq:",loss,"| alpha:",alpha
+            print ">epoch:",epoch,"| loss of last seq:",loss,"| alpha:",alpha,"| beta2:",beta2
             EPOCH.append(epoch)
             LOSS.append(loss)
-            alpha = (1/np.sqrt(600))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
         if (epoch >= EPOCH_NO):
             break
     print "\nDONE!"
     plt.plot(EPOCH,LOSS)
     plt.xlabel("EPOCH")
     plt.ylabel("LOSS OF LAST SEQ.")
-    plt.title("Dataset_size:"+str(len(corpus))+",seq_size:"+str(seq_size)+ ",no_of_sequences:"+str(len(corpus)/seq_size) +",epochs:"+str(EPOCH_NO)+",hiddenLayerSize:"+str(HLS)+",guccipoint:"+str(guccipoint)+",headsize:"+str(headSize))
+    plt.title("Dataset_size:"+str(len(corpus))+",seq_size:"+str(seq_size)+ ",no_of_sequences:"+str(len(corpus)/seq_size) +",epochs:"+str(EPOCH_NO)+",\nhiddenLayerSize:"+str(HLS)+",guccipoint:"+str(guccipoint)+",headsize:"+str(headSize))
     plt.show()
 
 def softmax(inpvec1):
@@ -485,7 +479,7 @@ def entropyLoss(out,tgt,gamma):
                 l += -(guccipoint)*np.log(output[i][j])
             else:
                 l += -np.log(1-output[i][j])
-    l/=(seq_size)
+    l/=(seq_size*dmodel)
     return l
 
 def convert(out):
@@ -511,7 +505,7 @@ def optimize(model, out, tgt, itr):
                 print "Overflow double-scalar"
                 print output[i]
                 sys.exit()
-    finalDeriv /= (seq_size)
+    finalDeriv /= (seq_size*dmodel)
     # K = target.shape[1] # target is seqXemb, and as emb is 1ofK, so emb_size=no. of classes, or no. of possible chars/words
     # for i in range(target.shape[0]):
     #     for j in range(target.shape[1]):
