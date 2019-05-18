@@ -8,7 +8,7 @@ warnings.simplefilter("error", RuntimeWarning)
 #########################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:400000] # max 5M
+corpus=open("seqText.txt",'r').read()[0:4000000] # max 5M
 # corpus=open("/content/drive/My Drive/app/seqText.txt",'r').read()[0:10000] # max 5M
 chars=list(set(corpus))
 emb=dict()
@@ -18,7 +18,7 @@ for i in range(dmodel):
     emb[chars[i]]=np.zeros([dmodel])
     emb[chars[i]][i]=1
 
-seq_size=100
+seq_size=50
 beg=0
 end=seq_size
 def get_seq(): # generate consecutive sequences of fixed length
@@ -40,18 +40,17 @@ print "single Sequence matrix input :",seq_size,"X",len(chars)
 print "Total sequences : ",len(corpus)/seq_size
 
 mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
-# mychars = [' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 # mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
 
 #########################################################################################
 # NETWORK PARAMETERS
 
-EPOCH_NO = 5
+EPOCH_NO = 8
 learningRate = 0.001 # learning rate
 gamma = 0.3 # for label smoothing using mass redistribution
 headSize = 4 # dmodel/headSize must be int
 guccipoint = 1.05 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
-HLS = 125 # embeddings expand upto this layer for each word in sequence
+HLS = 120 # embeddings expand upto this layer for each word in sequence
 
 # for adam
 warmup_steps = 4000
@@ -509,14 +508,6 @@ def optimize(model, out, tgt, itr):
                 print output[i]
                 sys.exit()
     finalDeriv /= (seq_size*dmodel)
-    # K = target.shape[1] # target is seqXemb, and as emb is 1ofK, so emb_size=no. of classes, or no. of possible chars/words
-    # for i in range(target.shape[0]):
-    #     for j in range(target.shape[1]):
-    #         if target[i][j] == 1:
-    #             target[i][j] = gamma
-    #         else:
-    #             target[i][j] = (1-gamma)/(K-1)
-    # finalDeriv = -target/(output*seq_size)
     model.backprop(derivOutput=finalDeriv,t=itr)
 
 init()
