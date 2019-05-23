@@ -8,8 +8,7 @@ warnings.simplefilter("error", RuntimeWarning)
 #########################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:4000000] # max 5M
-# corpus=open("/content/drive/My Drive/app/seqText.txt",'r').read()[0:10000] # max 5M
+corpus=open("seqText.txt",'r').read()[0:5000000] # max 5M
 chars=list(set(corpus))
 emb=dict()
 X,Y=[],[]
@@ -18,18 +17,18 @@ for i in range(dmodel):
     emb[chars[i]]=np.zeros([dmodel])
     emb[chars[i]][i]=1
 
-seq_size=50
+seq_size=10
 beg=0
 end=seq_size
 def get_seq(): # generate consecutive sequences of fixed length
     global beg,end
-    if end>len(corpus)-1:
+    if end>len(corpus):
         beg=0
         end=seq_size
-    inp_seq, out_seq=[],[]
+    inp_seq,out_seq=[],[]
     for i in range(beg,end):
         inp_seq.append(emb[corpus[i]])
-        out_seq.append(emb[corpus[i+1]])
+        out_seq.append(emb[corpus[i]])
     beg=end
     end+=seq_size
     return np.array(inp_seq),np.array(out_seq)
@@ -38,20 +37,17 @@ print "Sequence size :",seq_size
 print "single Embedding : 1 X",len(chars)
 print "single Sequence matrix input :",seq_size,"X",len(chars)
 print "Total sequences : ",len(corpus)/seq_size
-
 mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
-# mychars = [' ','a','c','b','e','d','g','f','i','h','k','m','l','o','n','p','s','r','u','t','w','v','y','z']
 
 #########################################################################################
 # NETWORK PARAMETERS
 
-EPOCH_NO = 8
+EPOCH_NO = 100
 learningRate = 0.001 # learning rate
 gamma = 0.3 # for label smoothing using mass redistribution
 headSize = 4 # dmodel/headSize must be int
-guccipoint = 1.05 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
-HLS = 120 # embeddings expand upto this layer for each word in sequence
-
+guccipoint = 1 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
+HLS = 110 # embeddings expand upto this layer for each word in sequence
 # for adam
 warmup_steps = 4000
 alpha = 0.001 # only for first update
@@ -59,7 +55,6 @@ beta1 = 0.9
 beta2 = 0 # increasing as per (1-1/itr)
 eps = 1e-8
 EPOCH,LOSS=[],[]
-
 print "Epochs:",EPOCH_NO
 
 #########################################################################################
@@ -94,12 +89,10 @@ class LayerNorm:
     def backprop(self,derivOutput,t):
         dgain = derivOutput * (self.inp - self.mean)/self.variance
         dbias = derivOutput
-        dinp = self.gain*(self.variance*np.ones([self.inp.shape[0],self.inp.shape[1]])*(1-1/dmodel) - (self.inp-self.mean)*2*(self.mean-self.inp)/(dmodel*dmodel*self.variance))/(self.variance*self.variance)
+        dvariance = np.array([np.sum(derivOutput*(self.gain*(self.inp-self.mean))*(-1/(self.variance**2)),axis=1)]).T
+        dmean = np.array([np.sum(derivOutput*( (self.gain/self.variance)*(-1) + dvariance*(np.array([np.sum(2*(self.inp-self.mean),axis=1)]).T/(2*self.variance*self.inp.shape[1])) ),axis=1)]).T
+        dinp = derivOutput*( self.gain/self.variance + 1/self.inp.shape[1] + 2*(self.inp-self.mean)/(2*self.variance*self.inp.shape[1]) )
         # apply gradient descent
-
-        # self.gain -= learningRate*(dgain/np.linalg.norm(dgain,'fro'))
-        # self.bias -= learningRate*(dbias/np.linalg.norm(dbias,'fro'))
-
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
         self.gainm = beta1*self.gainm + (1-beta1)*dgain
@@ -183,13 +176,6 @@ class MultiheadAttentionLayer:
             dk += np.dot(self.Wk[hitr], dvalK.T).T
             dv += np.dot(self.Wv[hitr], dvalV.T).T
         # apply gradient descent
-
-        # self.Wo -= learningRate*(dWo/np.linalg.norm(dWo,'fro'))
-        # for hitr in range(self.h):
-        #     self.Wq[hitr] -= learningRate*(dWq[hitr]/np.linalg.norm(dWq[hitr],'fro'))
-        #     self.Wk[hitr] -= learningRate*(dWk[hitr]/np.linalg.norm(dWk[hitr],'fro'))
-        #     self.Wv[hitr] -= learningRate*(dWv[hitr]/np.linalg.norm(dWv[hitr],'fro'))
-
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
         self.Wom = beta1*self.Wom + (1-beta1)*dWo
@@ -216,11 +202,6 @@ class EncoderOnlyMaskedAttentionLayer:
         self.k = k
         self.v = v
         self.a = np.dot(self.q, self.k.T)/np.sqrt(self.q.shape[1])
-        for i in range(self.a.shape[0]):
-            for j in range(self.a.shape[1]):
-                if j>i:
-                    self.a[i][j] = float('-inf')
-        # print "MskdAtt self.a",self.a #getting large
         self.z = softmax(self.a)
         self.att = np.dot(self.z, self.v)
         return self.att
@@ -228,7 +209,10 @@ class EncoderOnlyMaskedAttentionLayer:
     def backprop(self, derivOutput):
         dz=np.dot(self.v,derivOutput.T).T
         dv=np.dot(derivOutput.T,self.z).T
-        da=dz*sftderiv(self.a)
+        da=np.zeros([self.a.shape[0],self.a.shape[1]])
+        dsft=sftderiv(self.a)
+        for i in range(self.a.shape[0]):
+            da[i] = np.dot(dsft[i],dz[i].T).T
         dq=np.dot(self.k.T,da.T).T/np.sqrt(self.q.shape[1])
         dk=np.dot(da.T,self.q)/np.sqrt(self.q.shape[1])
         return dq,dk,dv
@@ -274,11 +258,6 @@ class FeedFwdLayer:
         dinp = np.dot(self.w1,dz.T).T
         # apply gradient descent
 
-        # self.w1 -= learningRate*(dw1/np.linalg.norm(dw1,'fro'))
-        # self.w2 -= learningRate*(dw2/np.linalg.norm(dw2,'fro'))
-        # self.b1 -= learningRate*(db1/np.linalg.norm(db1,'fro'))
-        # self.b2 -= learningRate*(db2/np.linalg.norm(db2,'fro'))
-
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
         self.w1m = beta1*self.w1m + (1-beta1)*dw1
@@ -310,21 +289,20 @@ class SimpleLinearLayer:
     def flow(self,inp):
         self.inp = inp
         self.z = np.dot(self.inp, self.w) + self.b
-        self.y = relu(self.z)
+        self.y = self.z
         self.y_curly = softmax(self.y)
         return self.y_curly
 
     def backprop(self,derivOutput,t):
-        dy=derivOutput*sftderiv(self.y)
-        dz=dy*reluDeriv(self.z)
+        dsft = sftderiv(self.y)
+        dy = np.zeros([self.y.shape[0],self.y.shape[1]])
+        for i in range(self.y.shape[0]):
+            dy[i] = np.dot(dsft[i],self.y[i])
+        dz=dy
         dw=np.dot(dz.T,self.inp).T
         db=dz
         dinp=np.dot(self.w,dz.T).T
         # apply gradient descent
-
-        # self.w -= learningRate*(dw/np.linalg.norm(dw,'fro'))
-        # self.b -= learningRate*(db/np.linalg.norm(db,'fro'))
-
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
         self.wm = beta1*self.wm + (1-beta1)*dw
@@ -368,6 +346,8 @@ class encoder:
         self.Layer4 = Layer()
         self.Layer5 = Layer()
         self.Layer6 = Layer()
+        self.Layer7 = Layer()
+        self.Layer8 = Layer()
         self.LinearLayer1 = SimpleLinearLayer()
 
     def flow(self,inp):
@@ -378,12 +358,16 @@ class encoder:
         self.L4output = self.Layer4.flow(self.L3output)
         self.L5output = self.Layer5.flow(self.L4output)
         self.L6output = self.Layer6.flow(self.L5output)
-        self.y = self.LinearLayer1.flow(self.L6output)
+        self.L7output = self.Layer7.flow(self.L6output)
+        self.L8output = self.Layer8.flow(self.L7output)
+        self.y = self.LinearLayer1.flow(self.L8output)
         return self.y
 
     def backprop(self,derivOutput,t):
         LL1inpDeriv = self.LinearLayer1.backprop(derivOutput,t)
-        L6inpDeriv = self.Layer6.backprop(LL1inpDeriv,t)
+        L8inpDeriv = self.Layer8.backprop(LL1inpDeriv,t)
+        L7inpDeriv = self.Layer7.backprop(L8inpDeriv,t)
+        L6inpDeriv = self.Layer6.backprop(L7inpDeriv,t)
         L5inpDeriv = self.Layer5.backprop(L6inpDeriv,t)
         L4inpDeriv = self.Layer4.backprop(L5inpDeriv,t)
         L3inpDeriv = self.Layer3.backprop(L4inpDeriv,t)
@@ -406,16 +390,13 @@ def init():
         alpha = (1/np.sqrt(500))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
         INP, TGT = get_seq()
         OUT = encoder1.flow(INP)
-        loss = entropyLoss(out = OUT, tgt = TGT, gamma = gamma) # gamma is hyperparameter (0,1)
-        optimize(model=encoder1,out=OUT,tgt=TGT,itr=itr)
+        loss = LossandOptimize(model=encoder1, out=OUT, tgt=TGT, itr=itr)
         sys.stdout.write("\r\x1b"+str(itr))
         sys.stdout.flush()
         beta2 = (1-1.0/(itr+10))
         if itr%(len(corpus)/seq_size) == 0:
             epoch+=1
-            # print "input: ",INP
-            # print "target: ",TGT[0]
-            # print "output: ",OUT[0]
+            print convert(TGT), convert(OUT)
             print ">epoch:",epoch,"| loss of last seq:",loss,"| alpha:",alpha,"| beta2:",beta2
             EPOCH.append(epoch)
             LOSS.append(loss)
@@ -425,7 +406,6 @@ def init():
     plt.plot(EPOCH,LOSS)
     plt.xlabel("EPOCH")
     plt.ylabel("LOSS OF LAST SEQ.")
-    plt.title("Dataset_size:"+str(len(corpus))+",seq_size:"+str(seq_size)+ ",no_of_sequences:"+str(len(corpus)/seq_size) +",epochs:"+str(EPOCH_NO)+",\nhiddenLayerSize:"+str(HLS)+",guccipoint:"+str(guccipoint)+",headsize:"+str(headSize))
     plt.show()
 
 def softmax(inpvec1):
@@ -448,40 +428,31 @@ def reluDeriv(inpvec):
     return (inpvec > 0)
 
 def sftderiv(inpvec):
-    return (softmax(inpvec)-(softmax(inpvec)**2))
+    deriv = np.zeros([inpvec.shape[0],inpvec.shape[1],inpvec.shape[1]])
+    for s in range(inpvec.shape[0]):
+        p = softmax(np.array([inpvec[s]]))
+        for i in range(inpvec.shape[1]):
+            for j in range(inpvec.shape[1]):
+                if i==j:
+                    deriv[s][i][j] = p[0][i]*(1-p[0][j])
+                else:
+                    deriv[s][i][j] = -p[0][i]*p[0][j]
 
-def tanhDeriv(inpvec):
-    return 1-np.tanh(inpvec)**2
+    return deriv
 
-def KLdvgLoss(out, tgt, gamma):
-    # target should be 1ofK
-    # output should be probabilities(via softmax), each row should add upto 1
-    # both should be floats, not ints
-    output = np.copy(out)
-    target = np.copy(tgt)
-    K = target.shape[1] # target is seqXemb, and as emb is 1ofK, so emb_size=no. of classes, or no. of possible chars/words
-    for i in range(target.shape[0]):
-        for j in range(target.shape[1]):
-            if target[i][j] == 1:
-                target[i][j] = gamma
-            else:
-                target[i][j] = (1-gamma)/(K-1)
-    KLloss = np.sum(target * (np.log(target/output)), axis=1)
-    seq_loss = np.sum(KLloss)/len(KLloss)
-    return seq_loss
-
-def entropyLoss(out,tgt,gamma):
+def LossandOptimize(model,out,tgt,itr):
     global guccipoint,seq_size,dmodel
     output = np.copy(out)
     target = np.copy(tgt)
     l=0
     for i in range(output.shape[0]):
-        for j in range(output[i].shape[0]):
-            if(target[i][j]==1):
-                l += -(guccipoint)*np.log(output[i][j])
-            else:
-                l += -np.log(1-output[i][j])
-    l/=(seq_size*dmodel)
+        lt = -np.log(output[i][np.argmax(target[i])])
+        l += lt
+    l/=output.shape[0]
+    finalDeriv=np.zeros([output.shape[0],output.shape[1]])
+    for i in range(target.shape[0]):
+        finalDeriv[i][np.argmax(target[i])] = -1/(output[i][np.argmax(target[i])]*output.shape[0])
+    model.backprop(derivOutput=finalDeriv,t=itr)            
     return l
 
 def convert(out):
@@ -490,24 +461,5 @@ def convert(out):
     for i in range(pred1.shape[0]):
         predString += mychars[np.argmax(pred1[i])]
     return predString
-
-def optimize(model, out, tgt, itr):
-    global guccipoint,dmodel,seq_size
-    output = np.copy(out)
-    target = np.copy(tgt)
-    finalDeriv=np.zeros([out.shape[0],out.shape[1]])
-    for i in range(target.shape[0]):
-        for j in range(target[i].shape[0]):
-            try:
-                if(target[i][j]==1):
-                    finalDeriv[i][j] = -guccipoint/(output[i][j])
-                else:
-                    finalDeriv[i][j] = 1/(1 - output[i][j])
-            except RuntimeWarning:
-                print "Overflow double-scalar"
-                print output[i]
-                sys.exit()
-    finalDeriv /= (seq_size*dmodel)
-    model.backprop(derivOutput=finalDeriv,t=itr)
 
 init()
