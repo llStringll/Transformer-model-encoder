@@ -1,3 +1,4 @@
+"""Transformer Vaswani et.al. encoder structure to get scoring for sequence"""
 import numpy as np
 import sys
 import time
@@ -8,54 +9,88 @@ warnings.simplefilter("error", RuntimeWarning)
 #########################################################################################
 # PARSING OF DATASET
 
-corpus=open("seqText.txt",'r').read()[0:5000000] # max 5M
-chars=list(set(corpus))
-emb=dict()
-X,Y=[],[]
-dmodel = len(chars)
-for i in range(dmodel):
-    emb[chars[i]]=np.zeros([dmodel])
-    emb[chars[i]][i]=1
+print "Reading data file..."
+corpus=open("seqText.txt",'r').read().replace('\n',' ').split(' ')
+def integer(lst):
+    vec=[]
+    for i in lst:
+        vec.append(float(i))
+    return np.array(vec)
 
-seq_size=10
+print "Reading embeddings file..."
+file='glove.6B.100d.txt' # pretrained word-embeddings file
+f=open(file,'r').read().split('\n')
+
+lookup=dict()
+
+print "Creating lookup..."
+for i in range(len(f)):
+    a=f[i].split(' ')
+    lookup[a[0]]=integer(a[1:])
+
+X=[]
+dmodel = len(lookup.values()[0])
+seq_size=25
+batch_size=10
+Y=[]
+
+print "Preparing custom TARGET data..."
+for i in range(len(corpus)/seq_size):
+    y = np.zeros([1,5])
+    y[0][np.random.randint(0,5)] = 1    
+    Y.append(y)
 beg=0
 end=seq_size
+
 def get_seq(): # generate consecutive sequences of fixed length
     global beg,end
     if end>len(corpus):
         beg=0
         end=seq_size
-    inp_seq,out_seq=[],[]
+    inp_seq=[]
     for i in range(beg,end):
-        inp_seq.append(emb[corpus[i]])
-        out_seq.append(emb[corpus[i]])
+        try:
+            entry = lookup[corpus[i]]
+        except KeyError:
+            entry = np.random.randn(dmodel,)
+        inp_seq.append(entry)
+    y = Y[beg/seq_size]
     beg=end
     end+=seq_size
-    return np.array(inp_seq),np.array(out_seq)
+    return np.array(inp_seq),y
+
+def get_batch():
+    BX,BY=[],[]
+    for i in range(batch_size):
+        X,Y=get_seq()
+        BX.append(X)
+        BY.append(Y)
+    return np.array(BX),np.array(BY)
 
 print "Sequence size :",seq_size
-print "single Embedding : 1 X",len(chars)
-print "single Sequence matrix input :",seq_size,"X",len(chars)
+print "single Embedding : 1 X",dmodel
+print "single Sequence matrix input :",seq_size,"X",dmodel
 print "Total sequences : ",len(corpus)/seq_size
-mychars = ['\n',' ','a','c','b','e','d','g','f','i','h','k','j','m','l','o','n','q','p','s','r','u','t','w','v','y','x','z']
 
 #########################################################################################
 # NETWORK PARAMETERS
 
-EPOCH_NO = 100
+EPOCH_NO = 300
 learningRate = 0.001 # learning rate
 gamma = 0.3 # for label smoothing using mass redistribution
-headSize = 4 # dmodel/headSize must be int
+headSize = 10 # dmodel/headSize must be int
 guccipoint = 1 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
-HLS = 110 # embeddings expand upto this layer for each word in sequence
+HLS = 400 # embeddings expand upto this layer for each word in sequence
 # for adam
-warmup_steps = 4000
+warmup_steps = 20
 alpha = 0.001 # only for first update
 beta1 = 0.9
 beta2 = 0 # increasing as per (1-1/itr)
 eps = 1e-8
 EPOCH,LOSS=[],[]
+
 print "Epochs:",EPOCH_NO
+print "Batch size:",batch_size
 
 #########################################################################################
 # NETWORK ARCHITECTURE
@@ -63,7 +98,7 @@ print "Epochs:",EPOCH_NO
 class DropoutLayer:
     def flow(self,inp):
         self.inp=inp
-        self.r=np.random.binomial(n=1,p=0.2,size=[self.inp.shape[0],self.inp.shape[1]])
+        self.r=np.random.binomial(n=1,p=0.1,size=[self.inp.shape[0],self.inp.shape[1],self.inp.shape[2]])
         self.y=self.inp*self.r
         return self.y
     def backprop(self,outderiv,t):
@@ -81,18 +116,25 @@ class LayerNorm:
 
     def flow(self,x):
         self.inp = x
-        self.mean = np.array([np.sum(self.inp,axis=1)/self.inp.shape[1]]).T
-        self.variance = np.sqrt(np.array([np.sum((self.inp-self.mean)**2,axis=1)]).T/self.inp.shape[1])
+        self.mean = np.array(np.sum(self.inp,axis=-1)/self.inp.shape[-1])
+        self.mean.resize(self.mean.shape[0],self.mean.shape[1],1)
+        self.variance = np.sqrt(np.array(np.sum((self.inp-self.mean)**2,axis=-1))/self.inp.shape[-1])
+        self.variance.resize(self.variance.shape[0],self.variance.shape[1],1)
         self.y = (self.gain/self.variance)*(self.inp-self.mean) + self.bias
         return self.y
 
     def backprop(self,derivOutput,t):
-        dgain = derivOutput * (self.inp - self.mean)/self.variance
-        dbias = derivOutput
-        dvariance = np.array([np.sum(derivOutput*(self.gain*(self.inp-self.mean))*(-1/(self.variance**2)),axis=1)]).T
-        dmean = np.array([np.sum(derivOutput*( (self.gain/self.variance)*(-1) + dvariance*(np.array([np.sum(2*(self.inp-self.mean),axis=1)]).T/(2*self.variance*self.inp.shape[1])) ),axis=1)]).T
-        dinp = derivOutput*( self.gain/self.variance + 1/self.inp.shape[1] + 2*(self.inp-self.mean)/(2*self.variance*self.inp.shape[1]) )
+        dgain = np.sum(derivOutput * (self.inp - self.mean)/self.variance,axis=0)
+        dbias = np.sum(derivOutput,axis=0)
+        dvariance = np.sum(derivOutput*(self.gain*(self.inp-self.mean))*(-1/(self.variance**2)),axis=-1)
+        dvariance.resize(self.variance.shape[0],self.variance.shape[1],1)
+        ts = np.sum(2*(self.inp-self.mean),axis=-1)
+        ts.resize(ts.shape[0],ts.shape[1],1)
+        dmean = np.sum(derivOutput*( (self.gain/self.variance)*(-1) + dvariance*(ts/(2*self.variance*self.inp.shape[-1])) ),axis=-1)
+        dmean.resize(self.mean.shape[0],self.mean.shape[1],1)
+        dinp = derivOutput*( self.gain/self.variance + 1/self.inp.shape[-1] + 2*(self.inp-self.mean)/(2*self.variance*self.inp.shape[-1]) )
         # apply gradient descent
+
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
         self.gainm = beta1*self.gainm + (1-beta1)*dgain
@@ -129,13 +171,13 @@ class MultiheadAttentionLayer:
         self.q = q
         self.k = k
         self.v = v
-        self.ConcatHeadAttOutput = np.zeros([self.q.shape[0], self.q.shape[1]])
+        self.ConcatHeadAttOutput = np.zeros([self.q.shape[0], self.q.shape[1],self.q.shape[2]])
         self.headOutputs, self.AttHinpQ,self.AttHinpK, self.AttHinpV = [], [], [], []
         for hitr in range(self.h+1):
             if hitr==0:
-                valQ=np.dot(self.q,self.Wq[hitr])
-                valK=np.dot(self.k,self.Wk[hitr])
-                valV=np.dot(self.v,self.Wv[hitr])
+                valQ=matmul(self.q,self.Wq[hitr])
+                valK=matmul(self.k,self.Wk[hitr])
+                valV=matmul(self.v,self.Wv[hitr])
                 self.AttHinpQ.append(valQ)
                 self.AttHinpK.append(valK)
                 self.AttHinpV.append(valV)
@@ -144,38 +186,39 @@ class MultiheadAttentionLayer:
             elif hitr==self.h:
                 self.ConcatHeadAttOutput = headAttOutput
             else:
-                valQ=np.dot(self.q,self.Wq[hitr])
-                valK=np.dot(self.k,self.Wk[hitr])
-                valV=np.dot(self.v,self.Wv[hitr])
+                valQ=matmul(self.q,self.Wq[hitr])
+                valK=matmul(self.k,self.Wk[hitr])
+                valV=matmul(self.v,self.Wv[hitr])
                 self.AttHinpQ.append(valQ)
                 self.AttHinpK.append(valK)
                 self.AttHinpV.append(valV)
                 val = self.AttLayer[hitr].flow(q=valQ, k=valK, v=valV)
-                headAttOutput = np.concatenate((headAttOutput, val),axis=1)
+                headAttOutput = np.concatenate((headAttOutput, val),axis=-1)
                 self.headOutputs.append(val)
-        self.output = np.dot(self.ConcatHeadAttOutput, self.Wo)
+        self.output = matmul(self.ConcatHeadAttOutput, self.Wo)
         return self.output
 
     def backprop(self,derivOutput,t):
-        dWo = np.dot(derivOutput.T, self.ConcatHeadAttOutput).T
-        dConcatHeadOutput = np.dot(self.Wo, derivOutput.T).T
+        dWo = np.sum(matmul(derivOutput, self.ConcatHeadAttOutput,t='a'),axis=0).T
+        dConcatHeadOutput = matmul(derivOutput,self.Wo,t='b')
         dheadOutputs, dAttHinpQ, dAttHinpK, dAttHinpV = [], [], [], []
         dWq, dWk, dWv = [], [], []
-        dq, dk, dv  = np.zeros([self.q.shape[0], self.q.shape[1]]), np.zeros([self.k.shape[0], self.k.shape[1]]), np.zeros([self.v.shape[0], self.v.shape[1]])
+        dq, dk, dv  = np.zeros([self.q.shape[0], self.q.shape[1],self.q.shape[2]]), np.zeros([self.k.shape[0], self.k.shape[1],self.k.shape[2]]), np.zeros([self.v.shape[0], self.v.shape[1],self.v.shape[2]])
         for hitr in range(self.h):
-            val = dConcatHeadOutput[:,hitr*(dmodel/self.h):(hitr+1)*(dmodel/self.h)]
+            val = dConcatHeadOutput[:,:,hitr*(dmodel/self.h):(hitr+1)*(dmodel/self.h)]
             dheadOutputs.append(val)
             dvalQ, dvalK, dvalV = self.AttLayer[hitr].backprop(val)
             dAttHinpQ.append(dvalQ)
             dAttHinpK.append(dvalK)
             dAttHinpV.append(dvalV)
-            dWq.append( np.dot(dvalQ.T,self.q).T )
-            dWk.append( np.dot(dvalK.T,self.k).T )
-            dWv.append( np.dot(dvalV.T,self.v).T )
-            dq += np.dot(self.Wq[hitr], dvalQ.T).T
-            dk += np.dot(self.Wk[hitr], dvalK.T).T
-            dv += np.dot(self.Wv[hitr], dvalV.T).T
+            dWq.append( np.sum(matmul(self.q,dvalQ,t='a'),axis=0) )
+            dWk.append( np.sum(matmul(self.k,dvalK,t='a'),axis=0) )
+            dWv.append( np.sum(matmul(self.v,dvalV,t='a'),axis=0) )
+            dq += matmul(dvalQ,self.Wq[hitr],t='b')
+            dk += matmul(dvalK,self.Wk[hitr],t='b')
+            dv += matmul(dvalV,self.Wv[hitr],t='b')
         # apply gradient descent
+
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
         self.Wom = beta1*self.Wom + (1-beta1)*dWo
@@ -201,30 +244,20 @@ class EncoderOnlyMaskedAttentionLayer:
         self.q = q
         self.k = k
         self.v = v
-        self.a = np.dot(self.q, self.k.T)/np.sqrt(self.q.shape[1])
+        self.a = matmul(self.q, self.k, t='b')/np.sqrt(self.q.shape[-1])
         self.z = softmax(self.a)
-        self.att = np.dot(self.z, self.v)
+        self.att = matmul(self.z, self.v)
         return self.att
 
     def backprop(self, derivOutput):
-        dz=np.dot(self.v,derivOutput.T).T
-        dv=np.dot(derivOutput.T,self.z).T
-        da=np.zeros([self.a.shape[0],self.a.shape[1]])
+        dz=matmul(derivOutput,self.v,t='b')
+        dv=matmul(self.z,derivOutput,t='a')
+        da=np.zeros([self.a.shape[0],self.a.shape[1],self.a.shape[2]])
         dsft=sftderiv(self.a)
-        for i in range(self.a.shape[0]):
-            da[i] = np.dot(dsft[i],dz[i].T).T
-        dq=np.dot(self.k.T,da.T).T/np.sqrt(self.q.shape[1])
-        dk=np.dot(da.T,self.q)/np.sqrt(self.q.shape[1])
+        da = matmul(dsft,dz)
+        dq=matmul(da,self.k)/np.sqrt(self.q.shape[-1])
+        dk=matmul(da,self.q,t='a')/np.sqrt(self.q.shape[-1])
         return dq,dk,dv
-
-class AttentionLayer:
-    def flow(self, q, k, v):
-        self.q = q
-        self.k = k
-        self.v = v
-        self.z = np.dot(self.q, self.k.T)/dmodel
-        self.att = np.dot(softmax(self.z), self.v)
-        return self.att
 
 class FeedFwdLayer:
     def __init__(self, hlayersize):
@@ -243,19 +276,19 @@ class FeedFwdLayer:
         self.b2v = np.zeros([seq_size, dmodel])
     def flow(self,finp):
         self.inp = finp
-        self.z = np.dot(self.inp, self.w1) + self.b1
+        self.z = matmul(self.inp, self.w1) + self.b1
         self.h = relu(self.z)
-        self.y = np.dot(self.h,self.w2) + self.b2
+        self.y = matmul(self.h,self.w2) + self.b2
         return self.y
 
     def backprop(self, derivOutput,t):
-        dw2 = np.dot(derivOutput.T, self.h).T
-        db2 = derivOutput
-        dh = np.dot(self.w2,derivOutput.T).T
+        dw2 = np.sum(matmul(derivOutput, self.h,t='a'),axis=0).T
+        db2 = np.sum(derivOutput,axis=0)
+        dh = matmul(derivOutput,self.w2,t='b')
         dz = dh*reluDeriv(self.z)
-        dw1 = np.dot(dz.T,self.inp).T
-        db1 = dz
-        dinp = np.dot(self.w1,dz.T).T
+        dw1 = np.sum(matmul(dz,self.inp,t='a'),axis=0).T
+        db1 = np.sum(dz,axis=0)
+        dinp = matmul(dz,self.w1,t='b')
         # apply gradient descent
 
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
@@ -279,39 +312,126 @@ class FeedFwdLayer:
 
 class SimpleLinearLayer:
     def __init__(self):
-        self.w = np.random.randn(dmodel, dmodel)
-        self.b = np.random.randn(seq_size, dmodel)
-        self.wm = np.zeros([dmodel,dmodel])
-        self.wv = np.zeros([dmodel,dmodel])
-        self.bm = np.zeros([seq_size,dmodel])
-        self.bv = np.zeros([seq_size,dmodel])
+        self.w1 = np.random.randn(1,seq_size)
+        self.b1 = np.zeros([1,dmodel])
+        self.w2 = np.random.randn(dmodel,dmodel/4)
+        self.b2 = np.zeros([1,dmodel/4])
+        self.w3 = np.random.randn(dmodel/4,dmodel/4)
+        self.b3 = np.zeros([1,dmodel/4])
+        self.w4 = np.random.randn(dmodel/4,dmodel/4)
+        self.b4 = np.zeros([1,dmodel/4])        
+        self.w5 = np.random.randn(dmodel/4,5)
+        self.b5 = np.zeros([1,5])
+        self.DL1 = DropoutLayer()
+        self.DL2 = DropoutLayer()
+        self.DL3 = DropoutLayer()
+        self.w1m = np.zeros([1,seq_size])
+        self.w1v = np.zeros([1,seq_size])
+        self.b1m = np.zeros([1,dmodel])
+        self.b1v = np.zeros([1,dmodel])
+        self.w2m = np.zeros([dmodel,dmodel/4])
+        self.w2v = np.zeros([dmodel,dmodel/4])
+        self.b2m = np.zeros([1,dmodel/4])
+        self.b2v = np.zeros([1,dmodel/4])
+        self.w3m = np.zeros([dmodel/4,dmodel/4])
+        self.w3v = np.zeros([dmodel/4,dmodel/4])
+        self.b3m = np.zeros([1,dmodel/4])
+        self.b3v = np.zeros([1,dmodel/4])
+        self.w4m = np.zeros([dmodel/4,dmodel/4])
+        self.w4v = np.zeros([dmodel/4,dmodel/4])
+        self.b4m = np.zeros([1,dmodel/4])
+        self.b4v = np.zeros([1,dmodel/4])        
+        self.w5m = np.zeros([dmodel/4,5])
+        self.w5v = np.zeros([dmodel/4,5])
+        self.b5m = np.zeros([1,5])
+        self.b5v = np.zeros([1,5])        
 
     def flow(self,inp):
-        self.inp = inp
-        self.z = np.dot(self.inp, self.w) + self.b
-        self.y = self.z
-        self.y_curly = softmax(self.y)
-        return self.y_curly
+        self.inp = inp # sXe
+        self.z1 = matmul(self.w1,self.inp) + self.b1
+        self.a1 = softmax(self.z1)
+        self.z2 = matmul(self.a1,self.w2) + self.b2
+        self.a2 = relu(self.z2)
+        self.a2d = self.DL1.flow(self.a2)
+        self.z3 = matmul(self.a2d,self.w3) + self.b3
+        self.a3 = relu(self.z3)
+        self.a3d = self.DL2.flow(self.a3)
+        self.z4 = matmul(self.a3d,self.w4) + self.b4
+        self.a4 = relu(self.z4)
+        self.a4d = self.DL3.flow(self.a4)
+        self.logits = matmul(self.a4d,self.w5) + self.b5
+        self.y = softmax(self.logits)
+        return self.y
 
     def backprop(self,derivOutput,t):
-        dsft = sftderiv(self.y)
-        dy = np.zeros([self.y.shape[0],self.y.shape[1]])
-        for i in range(self.y.shape[0]):
-            dy[i] = np.dot(dsft[i],self.y[i])
-        dz=dy
-        dw=np.dot(dz.T,self.inp).T
-        db=dz
-        dinp=np.dot(self.w,dz.T).T
-        # apply gradient descent
+        dsft = sftderiv(self.logits)
+        dlogits = np.zeros([self.logits.shape[0],self.logits.shape[1],self.logits.shape[2]])
+        dlogits = matmul(dsft,derivOutput)
+        db5 = np.sum(dlogits,axis=0)
+        dw5 = np.sum(matmul(self.a4d,dlogits,t='a'),axis=0)
+        da4d = matmul(dlogits,self.w5,t='b')
+        da4 = self.DL3.backprop(da4d,t)
+        dz4 = da4*reluDeriv(self.z4)
+        db4 = np.sum(dz4,axis=0)
+        dw4 = np.sum(matmul(self.a3d,dz4,t='a'),axis=0)
+        da3d = matmul(dz4,self.w4,t='b')
+        da3 = self.DL2.backprop(da3d,t)
+        dz3 = da3*reluDeriv(self.z3)
+        db3 = np.sum(dz3,axis=0)
+        dw3 = np.sum(matmul(self.a2d,dz3,t='a'),axis=0)
+        da2d = matmul(dz3,self.w3,t='b')
+        da2 = self.DL2.backprop(da2d,t)
+        dz2 = da2*reluDeriv(self.z2)
+        db2 = np.sum(dz2,axis=0)
+        dw2 = np.sum(matmul(self.a1,dz2,t='a'),axis=0)
+        da1 = matmul(dz2,self.w2,t='b')
+        dz1 = matmul(sftderiv(self.z1),da1)
+        db1 = np.sum(dz1,axis=0)
+        dw1 = np.sum(matmul(dz1,self.inp,t='b'),axis=0)
+        dinp = matmul(self.w1,dz1,t='a')
+
         alphat = alpha*(np.sqrt(1-(beta2**t))/(1-(beta1**t)))
 
-        self.wm = beta1*self.wm + (1-beta1)*dw
-        self.wv = beta2*self.wv + (1-beta2)*dw*dw
-        self.w -= alphat*self.wm/(np.sqrt(self.wv)+eps)
+        self.w1m = beta1*self.w1m + (1-beta1)*dw1
+        self.w1v = beta2*self.w1v + (1-beta2)*dw1*dw1
+        self.w1 -= alphat*self.w1m/(np.sqrt(self.w1v)+eps)
 
-        self.bm = beta1*self.bm + (1-beta1)*db
-        self.bv = beta2*self.bv + (1-beta2)*db*db
-        self.b -= alphat*self.bm/(np.sqrt(self.bv)+eps)
+        self.w2m = beta1*self.w2m + (1-beta1)*dw2
+        self.w2v = beta2*self.w2v + (1-beta2)*dw2*dw2
+        self.w2 -= alphat*self.w2m/(np.sqrt(self.w2v)+eps)
+
+        self.w3m = beta1*self.w3m + (1-beta1)*dw3
+        self.w3v = beta2*self.w3v + (1-beta2)*dw3*dw3
+        self.w3 -= alphat*self.w3m/(np.sqrt(self.w3v)+eps)
+
+        self.w4m = beta1*self.w4m + (1-beta1)*dw4
+        self.w4v = beta2*self.w4v + (1-beta2)*dw4*dw4
+        self.w4 -= alphat*self.w4m/(np.sqrt(self.w4v)+eps)
+
+        self.w5m = beta1*self.w5m + (1-beta1)*dw5
+        self.w5v = beta2*self.w5v + (1-beta2)*dw5*dw5
+        self.w5 -= alphat*self.w5m/(np.sqrt(self.w5v)+eps)                
+
+        self.b1m = beta1*self.b1m + (1-beta1)*db1
+        self.b1v = beta2*self.b1v + (1-beta2)*db1*db1
+        self.b1 -= alphat*self.b1m/(np.sqrt(self.b1v)+eps)
+
+        self.b2m = beta1*self.b2m + (1-beta1)*db2
+        self.b2v = beta2*self.b2v + (1-beta2)*db2*db2
+        self.b2 -= alphat*self.b2m/(np.sqrt(self.b2v)+eps)
+
+        self.b3m = beta1*self.b3m + (1-beta1)*db3
+        self.b3v = beta2*self.b3v + (1-beta2)*db3*db3
+        self.b3 -= alphat*self.b3m/(np.sqrt(self.b3v)+eps)
+
+        self.b4m = beta1*self.b4m + (1-beta1)*db4
+        self.b4v = beta2*self.b4v + (1-beta2)*db4*db4
+        self.b4 -= alphat*self.b4m/(np.sqrt(self.b4v)+eps)
+
+        self.b5m = beta1*self.b5m + (1-beta1)*db5
+        self.b5v = beta2*self.b5v + (1-beta2)*db5*db5
+        self.b5 -= alphat*self.b5m/(np.sqrt(self.b5v)+eps)                
+
         return dinp
 
 class Layer:
@@ -346,8 +466,6 @@ class encoder:
         self.Layer4 = Layer()
         self.Layer5 = Layer()
         self.Layer6 = Layer()
-        self.Layer7 = Layer()
-        self.Layer8 = Layer()
         self.LinearLayer1 = SimpleLinearLayer()
 
     def flow(self,inp):
@@ -358,16 +476,12 @@ class encoder:
         self.L4output = self.Layer4.flow(self.L3output)
         self.L5output = self.Layer5.flow(self.L4output)
         self.L6output = self.Layer6.flow(self.L5output)
-        self.L7output = self.Layer7.flow(self.L6output)
-        self.L8output = self.Layer8.flow(self.L7output)
-        self.y = self.LinearLayer1.flow(self.L8output)
+        self.y = self.LinearLayer1.flow(self.L6output)
         return self.y
 
     def backprop(self,derivOutput,t):
         LL1inpDeriv = self.LinearLayer1.backprop(derivOutput,t)
-        L8inpDeriv = self.Layer8.backprop(LL1inpDeriv,t)
-        L7inpDeriv = self.Layer7.backprop(L8inpDeriv,t)
-        L6inpDeriv = self.Layer6.backprop(L7inpDeriv,t)
+        L6inpDeriv = self.Layer6.backprop(LL1inpDeriv,t)
         L5inpDeriv = self.Layer5.backprop(L6inpDeriv,t)
         L4inpDeriv = self.Layer4.backprop(L5inpDeriv,t)
         L3inpDeriv = self.Layer3.backprop(L4inpDeriv,t)
@@ -379,43 +493,51 @@ class encoder:
 
 encoder1 = encoder()
 def init():
-    global learningRate,alpha,warmup_steps, beta2
+    global learningRate,alpha,warmup_steps,beta2,eps
     waste=raw_input("Press enter to start, any other key will cancel and exit the program:")
     if waste != "":
         sys.exit()
+    start_time = time.time()
     itr=0
     epoch=0
+    loss = 0
     while True:
         itr+=1
         alpha = (1/np.sqrt(500))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
-        INP, TGT = get_seq()
-        OUT = encoder1.flow(INP)
-        loss = LossandOptimize(model=encoder1, out=OUT, tgt=TGT, itr=itr)
-        sys.stdout.write("\r\x1b"+str(itr))
+        INP, TGT = get_batch()
+        OUT = encoder1.flow(pos_enc(INP))
+        loss += LossandOptimize(model=encoder1, out=OUT, tgt=TGT, itr=itr)/(seq_size*batch_size)
+        frac=itr*1.0/(EPOCH_NO*(len(corpus)/(seq_size*batch_size)))
+        mystr = '\rProgress:'+'[{:>8.3%}]'.format(frac)
+        sys.stdout.write(mystr)
         sys.stdout.flush()
         beta2 = (1-1.0/(itr+10))
-        if itr%(len(corpus)/seq_size) == 0:
+        if itr%(len(corpus)/(seq_size*batch_size)) == 0:
             epoch+=1
-            print convert(TGT), convert(OUT)
-            print ">epoch:",epoch,"| loss of last seq:",loss,"| alpha:",alpha,"| beta2:",beta2
+            print ">Stats:>>> Target:",TGT[0],"| Output:",OUT[0]
+            print ">epoch:",epoch,"| loss:",loss,"| alpha:",alpha,"| beta2:",beta2
             EPOCH.append(epoch)
             LOSS.append(loss)
+            loss = 0
         if (epoch >= EPOCH_NO):
             break
-    print "\nDONE!"
+    print "\nDONE!, elapsed time:",(time.time()-start_time)
     plt.plot(EPOCH,LOSS)
     plt.xlabel("EPOCH")
-    plt.ylabel("LOSS OF LAST SEQ.")
+    plt.ylabel("LOSS")
     plt.show()
 
 def softmax(inpvec1):
     # compute softmax for every row seperately
     inpvec = np.copy(inpvec1)
     for i in range(inpvec.shape[0]):
-        inpvec[i] = inpvec[i]-max(inpvec[i])
+        for j in range(inpvec.shape[1]):
+            inpvec[i][j] = inpvec[i][j]-max(inpvec[i][j])
     try:
         expovec = np.exp(inpvec)
-        sftvec = expovec/(np.array([np.sum(expovec,axis=1)])).T
+        s=np.sum(expovec,axis=-1)
+        s.resize(expovec.shape[0],expovec.shape[1],1)
+        sftvec = expovec/s
     except RuntimeWarning:
         print "Overflow..."
         sys.exit()
@@ -428,30 +550,48 @@ def reluDeriv(inpvec):
     return (inpvec > 0)
 
 def sftderiv(inpvec):
-    deriv = np.zeros([inpvec.shape[0],inpvec.shape[1],inpvec.shape[1]])
-    for s in range(inpvec.shape[0]):
-        p = softmax(np.array([inpvec[s]]))
-        for i in range(inpvec.shape[1]):
-            for j in range(inpvec.shape[1]):
-                if i==j:
-                    deriv[s][i][j] = p[0][i]*(1-p[0][j])
-                else:
-                    deriv[s][i][j] = -p[0][i]*p[0][j]
+    deriv = np.zeros([inpvec.shape[0],inpvec.shape[1],inpvec.shape[2],inpvec.shape[2]])
+    p = softmax(inpvec)
+    for b in range(inpvec.shape[0]):
+        for s in range(inpvec.shape[1]):
+                for i in range(inpvec.shape[2]):
+                    for j in range(inpvec.shape[2]):
+                        if i==j:
+                            deriv[b][s][i][j] = p[b][s][i]*(1-p[b][s][j])
+                        else:
+                            deriv[b][s][i][j] = -p[b][s][i]*p[b][s][j]
 
     return deriv
 
+# def LossandOptimize(model,out,tgt,itr):
+#     global guccipoint,seq_size,dmodel,batch_size
+#     output = np.copy(out)
+#     target = np.copy(tgt)
+#     l=0
+#     finalDeriv=np.zeros([output.shape[0],output.shape[1],output.shape[2]])
+#     for b in range(output.shape[0]):
+#         for s in range(output.shape[1]):
+#             lt = -np.log(output[b][s][np.argmax(target[b][s])])
+#             l += lt
+#             finalDeriv[b][s][np.argmax(target[b][s])] = -1/(output[b][s][np.argmax(target[b][s])])            
+#     model.backprop(derivOutput=finalDeriv,t=itr)            
+#     return l
+
 def LossandOptimize(model,out,tgt,itr):
-    global guccipoint,seq_size,dmodel
+    """USES KLdvgLoss"""
+    global guccipoint,gamma,seq_size,dmodel,batch_size
     output = np.copy(out)
     target = np.copy(tgt)
-    l=0
-    for i in range(output.shape[0]):
-        lt = -np.log(output[i][np.argmax(target[i])])
-        l += lt
-    l/=output.shape[0]
-    finalDeriv=np.zeros([output.shape[0],output.shape[1]])
-    for i in range(target.shape[0]):
-        finalDeriv[i][np.argmax(target[i])] = -1/(output[i][np.argmax(target[i])]*output.shape[0])
+    for _b in range(batch_size):
+        for _s in range(target.shape[1]):
+            for _e in range(target.shape[-1]):
+                if target[_b][_s][_e]==1:
+                    target[_b][_s][_e] = gamma
+                else:
+                    target[_b][_s][_e] = (1-gamma)/(target.shape[-1]-1)
+    finalDeriv=np.zeros([output.shape[0],output.shape[1],output.shape[2]])
+    l = np.sum(-target*np.log(output/target))
+    finalDeriv = -target/output
     model.backprop(derivOutput=finalDeriv,t=itr)            
     return l
 
@@ -461,5 +601,54 @@ def convert(out):
     for i in range(pred1.shape[0]):
         predString += mychars[np.argmax(pred1[i])]
     return predString
+
+def matmul(a,b,t=None):
+    """a is input, b is weight"""
+    out=[]
+    if len(a.shape)==len(b.shape):
+        for i in range(a.shape[0]):
+            if t=='b':
+                out.append(np.dot(a[i],b[i].T))
+            elif t=='a':
+                out.append(np.dot(a[i].T,b[i]))
+            else:
+                out.append(np.dot(a[i],b[i]))
+    elif len(a.shape)>len(b.shape) and len(a.shape)==4:
+        B=[]
+        for _b in range(a.shape[0]):
+            S=[]
+            for _s in range(a.shape[1]):
+                E = np.dot(a[_b][_s],b[_b][_s])
+                S.append(E)
+            S=np.array(S)
+            B.append(S)
+        out=B
+    elif len(a.shape)>len(b.shape):
+        for i in range(a.shape[0]):
+            if t=='a':
+                out.append(np.dot(a[i].T,b))
+            elif t=='b':
+                out.append(np.dot(a[i],b.T))
+            else:
+                out.append(np.dot(a[i],b))
+    elif len(b.shape)>len(a.shape):
+        for i in range(b.shape[0]):
+            if t=='a':
+                out.append(np.dot(a.T,b[i]))
+            elif t=='b':
+                out.append(np.dot(a,b[i].T))
+            else:
+                out.append(np.dot(a,b[i]))
+    out = np.array(out)
+    return out
+
+def pos_enc(inp):
+    pe = np.zeros([seq_size, dmodel])
+    position = np.arange(0, seq_size)
+    position.resize(seq_size,1)
+    div_term = np.exp(np.arange(0, dmodel, 2) * -(np.log(10000.0) / dmodel))
+    pe[:, 0::2] = np.sin(position * div_term)
+    pe[:, 1::2] = np.cos(position * div_term)
+    return inp+pe
 
 init()
