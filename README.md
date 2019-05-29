@@ -1,5 +1,5 @@
 # Transformer Model Encoder
-* Predicting next chars/words without time-based RNN variants, instead using bidirectional attention on tokens,thence predicting next tokens, based on contextual tokens.
+* Genrating vectors for tokens without time-based RNN variants, instead using bidirectional Attention towards contextual tokens
 * This is not the full transformer model, it is only the encoder part of it, to study attention(self, masked and multi-head) among the inputs.
 
 ### Dependencies required:
