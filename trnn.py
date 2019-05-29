@@ -79,10 +79,9 @@ EPOCH_NO = 300
 learningRate = 0.001 # learning rate
 gamma = 0.3 # for label smoothing using mass redistribution
 headSize = 10 # dmodel/headSize must be int
-guccipoint = 1 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
 HLS = 400 # embeddings expand upto this layer for each word in sequence
 # for adam
-warmup_steps = 20
+warmup_steps = 2000
 alpha = 0.001 # only for first update
 beta1 = 0.9
 beta2 = 0 # increasing as per (1-1/itr)
@@ -98,7 +97,7 @@ print "Batch size:",batch_size
 class DropoutLayer:
     def flow(self,inp):
         self.inp=inp
-        self.r=np.random.binomial(n=1,p=0.1,size=[self.inp.shape[0],self.inp.shape[1],self.inp.shape[2]])
+        self.r=np.random.binomial(n=1,p=0.2,size=[self.inp.shape[0],self.inp.shape[1],self.inp.shape[2]])
         self.y=self.inp*self.r
         return self.y
     def backprop(self,outderiv,t):
