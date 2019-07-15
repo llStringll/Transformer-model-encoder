@@ -1,4 +1,4 @@
-"""Transformer Vaswani et.al. encoder structure to get scoring for sequence"""
+"""Transformer Vaswani et.al. encoder structure to get scoring for sequence, batching applied, word embeddings applied, uses KLdvgLoss"""
 import numpy as np
 import sys
 import time
@@ -10,7 +10,7 @@ warnings.simplefilter("error", RuntimeWarning)
 # PARSING OF DATASET
 
 print "Reading data file..."
-corpus=open("seqText.txt",'r').read().replace('\n',' ').split(' ')
+corpus=open("seqText.txt",'r').read().replace('\n',' ').split(' ')[0:10000] # max 5M
 def integer(lst):
     vec=[]
     for i in lst:
@@ -18,7 +18,7 @@ def integer(lst):
     return np.array(vec)
 
 print "Reading embeddings file..."
-file='glove.6B.100d.txt' # pretrained word-embeddings file
+file='glove.6B.100d.txt'
 f=open(file,'r').read().split('\n')
 
 lookup=dict()
@@ -31,7 +31,8 @@ for i in range(len(f)):
 X=[]
 dmodel = len(lookup.values()[0])
 seq_size=25
-batch_size=10
+batch_size=25
+num_batches=(len(corpus)/seq_size)/batch_size#number of batches in one epoch
 Y=[]
 
 print "Preparing custom TARGET data..."
@@ -75,17 +76,18 @@ print "Total sequences : ",len(corpus)/seq_size
 #########################################################################################
 # NETWORK PARAMETERS
 
-EPOCH_NO = 300
+EPOCH_NO = 5
 learningRate = 0.001 # learning rate
-gamma = 0.3 # for label smoothing using mass redistribution
+gamma = 0.65 # for label smoothing using mass redistribution
 headSize = 10 # dmodel/headSize must be int
+guccipoint = 1 # has to be greater than 1 as per usage in this code, to give more weight to the a specific entry in the loss vector
 HLS = 400 # embeddings expand upto this layer for each word in sequence
 # for adam
-warmup_steps = 2000
+warmup_steps = 100
 alpha = 0.001 # only for first update
 beta1 = 0.9
 beta2 = 0 # increasing as per (1-1/itr)
-eps = 1e-8
+eps = 1e-7
 EPOCH,LOSS=[],[]
 
 print "Epochs:",EPOCH_NO
@@ -97,7 +99,7 @@ print "Batch size:",batch_size
 class DropoutLayer:
     def flow(self,inp):
         self.inp=inp
-        self.r=np.random.binomial(n=1,p=0.2,size=[self.inp.shape[0],self.inp.shape[1],self.inp.shape[2]])
+        self.r=np.random.binomial(n=1,p=0.3,size=[self.inp.shape[0],self.inp.shape[1],self.inp.shape[2]])
         self.y=self.inp*self.r
         return self.y
     def backprop(self,outderiv,t):
@@ -502,21 +504,21 @@ def init():
     loss = 0
     while True:
         itr+=1
-        alpha = (1/np.sqrt(500))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
+        alpha = (1/np.sqrt(dmodel))*min(1/np.sqrt(itr),itr*(1/(np.sqrt(warmup_steps)*warmup_steps)))
         INP, TGT = get_batch()
         OUT = encoder1.flow(pos_enc(INP))
-        loss += LossandOptimize(model=encoder1, out=OUT, tgt=TGT, itr=itr)/(seq_size*batch_size)
-        frac=itr*1.0/(EPOCH_NO*(len(corpus)/(seq_size*batch_size)))
+        loss += LossandOptimize(model=encoder1, out=OUT, tgt=TGT, itr=itr)
+        frac=itr*1.0/(EPOCH_NO*num_batches)
         mystr = '\rProgress:'+'[{:>8.3%}]'.format(frac)
         sys.stdout.write(mystr)
         sys.stdout.flush()
         beta2 = (1-1.0/(itr+10))
-        if itr%(len(corpus)/(seq_size*batch_size)) == 0:
+        if itr%num_batches == 0:
             epoch+=1
-            print ">Stats:>>> Target:",TGT[0],"| Output:",OUT[0]
-            print ">epoch:",epoch,"| loss:",loss,"| alpha:",alpha,"| beta2:",beta2
+            accLoss = accuracy(model=encoder1)
+            print ">epoch:",epoch,"| loss:",accLoss,"| alpha:",alpha,"| beta2:",beta2
             EPOCH.append(epoch)
-            LOSS.append(loss)
+            LOSS.append(accLoss)
             loss = 0
         if (epoch >= EPOCH_NO):
             break
@@ -589,8 +591,8 @@ def LossandOptimize(model,out,tgt,itr):
                 else:
                     target[_b][_s][_e] = (1-gamma)/(target.shape[-1]-1)
     finalDeriv=np.zeros([output.shape[0],output.shape[1],output.shape[2]])
-    l = np.sum(-target*np.log(output/target))
-    finalDeriv = -target/output
+    l = np.sum(-target*np.log(output/target))/batch_size
+    finalDeriv = -(target/output)/batch_size
     model.backprop(derivOutput=finalDeriv,t=itr)            
     return l
 
@@ -600,6 +602,37 @@ def convert(out):
     for i in range(pred1.shape[0]):
         predString += mychars[np.argmax(pred1[i])]
     return predString
+
+def accuracy(model):
+    global gamma,seq_size
+    abeg = np.random.randint(0,(len(corpus)/seq_size))*seq_size
+    aend = abeg+seq_size
+    ainp_seq=[]
+    for i in range(abeg,aend):
+        try:
+            aentry = lookup[corpus[i]]
+        except KeyError:
+            aentry = np.random.randn(dmodel,)
+        ainp_seq.append(aentry)
+    ay = Y[abeg/seq_size]
+    ay = np.array([ay])
+    ainp_seq = np.array(ainp_seq)
+    ainp_seq = np.array([ainp_seq])
+    aout = model.flow(pos_enc(ainp_seq))
+
+    output = np.copy(aout)
+    target = np.copy(ay)
+    for _b in range(1):
+        for _s in range(target.shape[1]):
+            for _e in range(target.shape[-1]):
+                if target[_b][_s][_e]==1:
+                    target[_b][_s][_e] = gamma
+                else:
+                    target[_b][_s][_e] = (1-gamma)/(target.shape[-1]-1)
+    l = np.sum(-target*np.log(output/target))/1
+    print "\nAccuracy metric>>>> output:",aout,", target:",ay
+    return l    
+
 
 def matmul(a,b,t=None):
     """a is input, b is weight"""
